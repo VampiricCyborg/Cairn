@@ -1,6 +1,243 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cairn.dev/schema/entry.schema.json",
+  "$defs": {
+    "Confidence": {
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "title": "Confidence",
+      "type": "string"
+    },
+    "EntryStatus": {
+      "description": "Persisted lifecycle state of an entry file. See SPEC.md for the full\nstate machine, including the pre-persistence states (candidate, dropped)\nthat never become a `status` value.",
+      "enum": [
+        "staged",
+        "approved",
+        "rejected",
+        "superseded",
+        "archived"
+      ],
+      "title": "EntryStatus",
+      "type": "string"
+    },
+    "EntryType": {
+      "description": "The three kinds of knowledge a Cairn entry can hold.",
+      "enum": [
+        "strategy",
+        "gotcha",
+        "fact"
+      ],
+      "title": "EntryType",
+      "type": "string"
+    },
+    "Evidence": {
+      "additionalProperties": false,
+      "description": "Provenance for an entry: where it came from and what it points at.",
+      "properties": {
+        "harness": {
+          "title": "Harness",
+          "type": "string"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "captured_at": {
+          "format": "date-time",
+          "title": "Captured At",
+          "type": "string"
+        },
+        "artifacts": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Artifacts",
+          "type": "array"
+        },
+        "commit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Commit"
+        },
+        "excerpt_sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Excerpt Sha256"
+        }
+      },
+      "required": [
+        "harness",
+        "captured_at"
+      ],
+      "title": "Evidence",
+      "type": "object"
+    },
+    "Review": {
+      "additionalProperties": false,
+      "description": "Who approved an entry, and when. Absent until a human acts on it.",
+      "properties": {
+        "approved_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Approved By"
+        },
+        "approved_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Approved At"
+        }
+      },
+      "title": "Review",
+      "type": "object"
+    },
+    "Usage": {
+      "additionalProperties": false,
+      "description": "Injection and feedback counters, updated as the entry is used.",
+      "properties": {
+        "injected": {
+          "default": 0,
+          "title": "Injected",
+          "type": "integer"
+        },
+        "marked_useful": {
+          "default": 0,
+          "title": "Marked Useful",
+          "type": "integer"
+        },
+        "marked_stale": {
+          "default": 0,
+          "title": "Marked Stale",
+          "type": "integer"
+        }
+      },
+      "title": "Usage",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "A single unit of curated, human-approved knowledge in the `.cairn/` store.",
+  "properties": {
+    "id": {
+      "title": "Id",
+      "type": "string"
+    },
+    "type": {
+      "$ref": "#/$defs/EntryType"
+    },
+    "title": {
+      "title": "Title",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/EntryStatus"
+    },
+    "spec_version": {
+      "title": "Spec Version",
+      "type": "string"
+    },
+    "scope": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Scope",
+      "type": "array"
+    },
+    "tags": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Tags",
+      "type": "array"
+    },
+    "confidence": {
+      "$ref": "#/$defs/Confidence"
+    },
+    "evidence": {
+      "$ref": "#/$defs/Evidence"
+    },
+    "created": {
+      "format": "date-time",
+      "title": "Created",
+      "type": "string"
+    },
+    "updated": {
+      "format": "date-time",
+      "title": "Updated",
+      "type": "string"
+    },
+    "supersedes": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Supersedes",
+      "type": "array"
+    },
+    "review": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Review"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "usage": {
+      "$ref": "#/$defs/Usage"
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "title",
+    "status",
+    "spec_version",
+    "confidence",
+    "evidence",
+    "created",
+    "updated"
+  ],
   "title": "Cairn entry",
   "type": "object"
 }

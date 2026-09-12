@@ -1,6 +1,168 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cairn.dev/schema/trace.schema.json",
+  "$defs": {
+    "Diff": {
+      "additionalProperties": false,
+      "description": "A file changed during the session, as a unified diff.",
+      "properties": {
+        "file": {
+          "title": "File",
+          "type": "string"
+        },
+        "patch": {
+          "title": "Patch",
+          "type": "string"
+        }
+      },
+      "required": [
+        "file",
+        "patch"
+      ],
+      "title": "Diff",
+      "type": "object"
+    },
+    "ToolCall": {
+      "additionalProperties": false,
+      "description": "A tool invocation made by the agent during a turn.",
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "input": {
+          "additionalProperties": true,
+          "title": "Input",
+          "type": "object"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "ToolCall",
+      "type": "object"
+    },
+    "ToolResult": {
+      "additionalProperties": false,
+      "description": "The result of one tool invocation.",
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "output": {
+          "default": null,
+          "title": "Output"
+        },
+        "is_error": {
+          "default": false,
+          "title": "Is Error",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "ToolResult",
+      "type": "object"
+    },
+    "Turn": {
+      "additionalProperties": false,
+      "description": "One turn of a session transcript, normalized across harnesses.",
+      "properties": {
+        "role": {
+          "$ref": "#/$defs/TurnRole"
+        },
+        "content": {
+          "title": "Content",
+          "type": "string"
+        },
+        "tool_calls": {
+          "items": {
+            "$ref": "#/$defs/ToolCall"
+          },
+          "title": "Tool Calls",
+          "type": "array"
+        },
+        "tool_results": {
+          "items": {
+            "$ref": "#/$defs/ToolResult"
+          },
+          "title": "Tool Results",
+          "type": "array"
+        }
+      },
+      "required": [
+        "role",
+        "content"
+      ],
+      "title": "Turn",
+      "type": "object"
+    },
+    "TurnRole": {
+      "enum": [
+        "user",
+        "assistant",
+        "tool"
+      ],
+      "title": "TurnRole",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Canonical, harness-agnostic representation of one coding session.",
+  "properties": {
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "harness": {
+      "title": "Harness",
+      "type": "string"
+    },
+    "started_at": {
+      "format": "date-time",
+      "title": "Started At",
+      "type": "string"
+    },
+    "ended_at": {
+      "format": "date-time",
+      "title": "Ended At",
+      "type": "string"
+    },
+    "turns": {
+      "items": {
+        "$ref": "#/$defs/Turn"
+      },
+      "title": "Turns",
+      "type": "array"
+    },
+    "errors": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Errors",
+      "type": "array"
+    },
+    "diffs": {
+      "items": {
+        "$ref": "#/$defs/Diff"
+      },
+      "title": "Diffs",
+      "type": "array"
+    },
+    "outcome": {
+      "title": "Outcome",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "harness",
+    "started_at",
+    "ended_at",
+    "outcome"
+  ],
   "title": "Cairn session trace",
   "type": "object"
 }
