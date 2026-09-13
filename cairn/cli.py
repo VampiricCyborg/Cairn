@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import shutil
+import tomllib
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -23,8 +24,9 @@ from cairn.core.models import Entry, EntryStatus, EntryType, SessionTrace
 from cairn.core.normalizer import normalize_claude_code_transcript
 from cairn.core.store import Store, StoreNotFoundError, load_entry
 from cairn.providers.anthropic import AnthropicProvider
-from cairn.providers.base import Provider
+from cairn.providers.base import Provider, ProviderUnavailableError
 from cairn.providers.mock import MockProvider
+from cairn.providers.registry import get_provider
 from cairn.review.cli_review import run_review
 
 logger = logging.getLogger(__name__)
@@ -45,6 +47,18 @@ spec_version = "0.1.0"
 name  = "{provider_name}"          # anthropic | openai | ollama | mock
 model = "claude-sonnet-4-6"
 max_output_tokens = 2000
+
+# Local model via Ollama (no API key, runs offline):
+#   name  = "ollama"
+#   model = "qwen2.5-coder:14b"
+#   base_url = "http://localhost:11434"
+
+# Any OpenAI-compatible endpoint -- Groq shown, also works for OpenAI, Together, etc.
+# api_key_env names the environment variable holding the key; it is never written here.
+#   name         = "openai"
+#   model        = "llama-3.1-8b-instant"
+#   base_url     = "https://api.groq.com/openai/v1"
+#   api_key_env  = "GROQ_API_KEY"
 
 [reflect]
 max_candidates_per_session = 3
@@ -249,17 +263,28 @@ def _select_within_budget(items: list[tuple[Entry, str]], budget: int) -> list[t
     return selected
 
 
+def _load_config_toml(cairn_root: Path) -> dict[str, Any]:
+    config_path = cairn_root / "config.toml"
+    if not config_path.is_file():
+        return {}
+    try:
+        with config_path.open("rb") as handle:
+            return tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        logger.warning("could not parse %s: %s", config_path, exc)
+        return {}
+
+
 def _resolve_provider(cairn_root: Path) -> Provider:
-    """The provider `cairn reflect` and the SessionStart queue sweep use:
-    `config.toml`'s `[provider].name` if it's `"anthropic"` and
-    `ANTHROPIC_API_KEY` is set in the environment, otherwise the offline
-    `MockProvider` -- never make a network call without both being true.
+    """The provider `cairn reflect` and the SessionStart queue sweep use, per
+    `config.toml`'s `[provider]` table (see `cairn.providers.registry.get_provider`).
+
+    Raises `ProviderUnavailableError` for a provider that is unconfigured,
+    misconfigured, or unreachable -- callers decide whether that means
+    failing loudly (`reflect`) or skipping the sweep (the SessionStart hook).
     """
 
-    name = load_provider_name(cairn_root)
-    if name == "anthropic" and os.environ.get("ANTHROPIC_API_KEY"):
-        return AnthropicProvider()
-    return MockProvider()
+    return get_provider(_load_config_toml(cairn_root))
 
 
 _QUEUE_SWEEP_MAX_CANDIDATES = 3
@@ -333,7 +358,12 @@ def context(
         raise typer.Exit(code=1) from exc
 
     if hook:
-        _sweep_queue(store, _resolve_provider(cairn_root))
+        try:
+            provider = _resolve_provider(cairn_root)
+        except ProviderUnavailableError as exc:
+            logger.warning("SessionStart sweep: provider unavailable (%s); skipping sweep", exc)
+        else:
+            _sweep_queue(store, provider)
 
     items = _load_approved_entries(store)
     if scope is not None:
@@ -396,10 +426,14 @@ def reflect(
         typer.echo(f"error: could not load trace from {trace}: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
-    provider = _resolve_provider(cairn_root)
-    candidates = provider.extract(
-        session_trace, known=store.approved(), max_candidates=max_candidates
-    )
+    try:
+        provider = _resolve_provider(cairn_root)
+        candidates = provider.extract(
+            session_trace, known=store.approved(), max_candidates=max_candidates
+        )
+    except ProviderUnavailableError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
 
     if not candidates:
         typer.echo("no candidates extracted")

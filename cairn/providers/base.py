@@ -14,6 +14,13 @@ def make_entry_id(entry_type: EntryType, seed: str) -> str:
     return f"{entry_type.value}-{digest[:6]}"
 
 
+class ProviderUnavailableError(Exception):
+    """Raised when a configured provider cannot be used right now: an
+    unreachable local server, a missing or rejected API key, or an unknown
+    `[provider].name`. Callers (the CLI, the SessionStart sweep) decide
+    whether that means failing loudly or falling back."""
+
+
 class Provider(Protocol):
     """A pluggable extraction backend.
 
