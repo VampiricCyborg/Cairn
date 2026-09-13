@@ -264,13 +264,13 @@ flowchart TD
     F --> G["Candidate entries with evidence"]
     G --> H{"Schema valid?"}
     H -->|no| Z1["drop, log"]
-    H -->|yes| I{"Near-duplicate of an approved entry?"}
+    H -->|yes| M{"In rejected tombstones?"}
+    M -->|yes| Z2["drop silently"]
+    M -->|no| I{"Near-duplicate of an approved<br/>or staged entry?"}
     I -->|yes| J["Propose amendment instead of new entry"]
     I -->|no| K{"Contradicts an approved entry?"}
     K -->|yes| L["Propose supersession, both shown to reviewer"]
-    K -->|no| M{"In rejected tombstones?"}
-    M -->|yes| Z2["drop silently"]
-    M -->|no| N["Write to staging/"]
+    K -->|no| N["Write to staging/"]
     J --> N
     L --> N
 ```

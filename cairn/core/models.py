@@ -102,6 +102,23 @@ class Entry(BaseModel):
     supersedes: list[str] = Field(default_factory=list)
     review: Review | None = None
     usage: Usage = Field(default_factory=Usage)
+    proposed_amendment_of: str | None = Field(
+        default=None,
+        description=(
+            "Set by the Curator on a staged candidate the near-duplicate gate matched "
+            "against an approved entry: the id of that entry. Approving the candidate "
+            "amends the target in place instead of creating a new entry."
+        ),
+    )
+    proposed_supersession_of: str | None = Field(
+        default=None,
+        description=(
+            "Set by the Curator on a staged candidate the contradiction gate flagged as a "
+            "structural (same scope and type, distinct title) pairing with an approved "
+            "entry: the id of that entry. A structural flag only, for the human reviewer "
+            "to adjudicate — never auto-approved."
+        ),
+    )
 
 
 class CandidateEntry(BaseModel):

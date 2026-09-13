@@ -225,6 +225,32 @@
     },
     "usage": {
       "$ref": "#/$defs/Usage"
+    },
+    "proposed_amendment_of": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Set by the Curator on a staged candidate the near-duplicate gate matched against an approved entry: the id of that entry. Approving the candidate amends the target in place instead of creating a new entry.",
+      "title": "Proposed Amendment Of"
+    },
+    "proposed_supersession_of": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Set by the Curator on a staged candidate the contradiction gate flagged as a structural (same scope and type, distinct title) pairing with an approved entry: the id of that entry. A structural flag only, for the human reviewer to adjudicate \u2014 never auto-approved.",
+      "title": "Proposed Supersession Of"
     }
   },
   "required": [

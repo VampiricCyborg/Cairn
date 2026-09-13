@@ -4,16 +4,30 @@ Walks `staging/` one candidate at a time, in file order, and applies the
 human decision per SPEC.md's entry lifecycle:
 
 - approve (optionally after editing): `status: approved`, `review` filled in,
-  written to `entries/<type>/`, staging file removed.
-- reject: a tombstone (id, original title, reason) written to `rejected/`,
-  staging file removed.
-- merge: for now, a reject with reason "merged into <target id>".
+  written to `entries/<type>/`, staging file removed. If the candidate
+  carries `proposed_amendment_of`, this instead amends that target entry in
+  place (see `_apply_amendment`) and the candidate contributes no new file.
+- reject: a tombstone (id, title, reason, excerpt hash) written to
+  `rejected/`, staging file removed.
+- merge: prompts for an approved entry of the same type and amends it in
+  place with the candidate's evidence, the same mechanic as an
+  `proposed_amendment_of` approval.
 - skip: staging file left untouched.
 - quit: stop, leaving every remaining candidate in staging.
 
 Tombstones are written as `rejected/<id>.json`, not `.md`: `rejected/*.md` is
 scanned and validated as full `Entry` documents by `Store.load_all` and
-`cairn validate`, and a tombstone is deliberately not a full entry.
+`cairn validate`, and a tombstone is deliberately not a full entry. The
+tombstone's `excerpt_sha256` (copied from the candidate's own evidence, not
+recomputed) is what lets `Curator.check_tombstoned` recognize an exact
+re-proposal of the same evidence; see `cairn.core.curator`.
+
+A staged candidate the Curator flagged via `proposed_amendment_of` or
+`proposed_supersession_of` (see `cairn.core.curator.Curator.stage_candidate`)
+is shown with that flag prominently. Approving a `proposed_amendment_of`
+candidate, or choosing `merge`, updates the target approved entry in place
+(the `approved -> approved` amendment transition in SPEC.md's entry
+lifecycle) rather than creating a new entry.
 """
 
 import json
@@ -169,9 +183,29 @@ class ReviewSession:
         )
         evidence_line = Text("evidence: " + " · ".join(evidence_parts))
 
+        notices: list[Text] = []
+        if entry.proposed_amendment_of:
+            notices.append(
+                Text(
+                    f"PROPOSED AMENDMENT of {entry.proposed_amendment_of} — "
+                    "approving updates that entry in place",
+                    style="bold yellow",
+                )
+            )
+        if entry.proposed_supersession_of:
+            notices.append(
+                Text(
+                    f"PROPOSED SUPERSESSION of {entry.proposed_supersession_of} — "
+                    "structural match only, verify the claims actually conflict",
+                    style="bold red",
+                )
+            )
+
         self.console.print(
             Panel(
-                Group(header, meta, evidence_line, Text(""), Text(candidate.body.strip())),
+                Group(
+                    header, meta, evidence_line, *notices, Text(""), Text(candidate.body.strip())
+                ),
                 title="cairn review",
                 subtitle=f"candidate {index} of {total}",
                 expand=True,
@@ -200,11 +234,54 @@ class ReviewSession:
 
     # -- actions --------------------------------------------------------------
 
+    def _apply_amendment(self, candidate: _Candidate, target_id: str) -> bool:
+        """Update the approved entry `target_id` in place with `candidate`'s
+        evidence: the `approved -> approved` (amended) transition in
+        SPEC.md's entry lifecycle. `updated` is bumped and the candidate's
+        body is appended to the target's body as a revision note; the
+        target keeps its `id` and its original `review`. The candidate's
+        staging file is removed since its evidence now lives in the target,
+        not as a separate entry.
+
+        Returns False, leaving the candidate staged and nothing written, if
+        `target_id` does not currently name an approved entry -- e.g. it was
+        rejected, or is itself still awaiting review -- so the caller can
+        fall back to approving the candidate as a normal new entry instead
+        of silently discarding it.
+        """
+
+        targets = {entry.id: entry for entry in self.store.approved()}
+        target = targets.get(target_id)
+        if target is None:
+            return False
+
+        existing_body = self.store.read_body(target) or ""
+        note = (
+            f"\n\n---\n\n## Amendment ({self.now().date().isoformat()}, "
+            f"approved by {self._reviewer_name()})\n\n{candidate.body.strip()}\n"
+        )
+        amended = target.model_copy(update={"updated": self.now()})
+        self.store.write_entry(amended, existing_body.rstrip("\n") + note)
+        candidate.path.unlink()
+        return True
+
     def _approve(self, candidate: _Candidate, entry: Entry, body: str) -> None:
+        if entry.proposed_amendment_of:
+            if self._apply_amendment(candidate, entry.proposed_amendment_of):
+                self.summary.approved += 1
+                typer.echo(f"amended {entry.proposed_amendment_of} with evidence from {entry.id}")
+                return
+            typer.echo(
+                f"{entry.proposed_amendment_of!r} is no longer an approved entry; "
+                f"approving {entry.id} as a new entry instead"
+            )
+
         approved = entry.model_copy(
             update={
                 "status": EntryStatus.APPROVED,
                 "review": Review(approved_by=self._reviewer_name(), approved_at=self.now()),
+                "proposed_amendment_of": None,
+                "proposed_supersession_of": None,
             }
         )
         # Write the approved copy before removing the staged one, so a crash
@@ -219,6 +296,7 @@ class ReviewSession:
             "id": candidate.entry.id,
             "title": candidate.entry.title,
             "reason": reason,
+            "excerpt_sha256": candidate.entry.evidence.excerpt_sha256,
         }
         self.store.rejected_dir.mkdir(parents=True, exist_ok=True)
         target = self.store.rejected_dir / f"{candidate.entry.id}.json"
@@ -236,10 +314,11 @@ class ReviewSession:
         self._reject(candidate, reason)
 
     def _merge(self, candidate: _Candidate) -> bool:
-        """Returns False if there is nothing to merge into, so the caller can
-        re-prompt for a different action on the same candidate."""
+        """Prompt for an approved entry to merge `candidate` into, then apply
+        the same amendment mechanic `_approve` uses for a Curator-proposed
+        amendment. Returns False if there is nothing to merge into, so the
+        caller can re-prompt for a different action on the same candidate."""
 
-        # TODO: real amendment support is P3's supersession/amendment work, not this command
         targets = [entry for entry in self.store.approved() if entry.type is candidate.entry.type]
         if not targets:
             typer.echo(f"no approved {candidate.entry.type.value} entries to merge into")
@@ -254,7 +333,10 @@ class ReviewSession:
             if target_id in ids:
                 break
             typer.echo(f"{target_id!r} is not one of the listed ids")
-        self._reject(candidate, f"merged into {target_id}")
+
+        self._apply_amendment(candidate, target_id)
+        self.summary.approved += 1
+        typer.echo(f"amended {target_id} with evidence from {candidate.entry.id}")
         return True
 
     def _edit(self, candidate: _Candidate) -> bool:

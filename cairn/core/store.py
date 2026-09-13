@@ -144,6 +144,16 @@ class Store:
         filename = f"{entry.created.date().isoformat()}-{_slugify(entry.title)}-{id_suffix}.md"
         return directory / filename
 
+    def read_body(self, entry: Entry) -> str | None:
+        """The Markdown body already written for `entry`, at the path
+        `write_entry` would compute for it, or `None` if nothing is written
+        there yet."""
+
+        path = self._target_path(entry)
+        if not path.is_file():
+            return None
+        return frontmatter.load(path).content
+
     def write_entry(self, entry: Entry, body: str) -> Path:
         """Atomically write `entry` (with Markdown `body`) to the store.
 
