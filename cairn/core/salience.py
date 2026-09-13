@@ -211,9 +211,16 @@ def find_salient_spans(
     trace: SessionTrace,
     max_test_transition_span: int = DEFAULT_MAX_TEST_TRANSITION_SPAN,
 ) -> list[SalientSpan]:
-    """The turn spans of `trace` worth showing the reflector: errors (with
-    one turn of surrounding context on each side), retry/reversal turns,
-    and fail-then-pass test transitions. Overlapping spans are merged."""
+    """The turn-indexed spans of `trace` worth showing the reflector: errors
+    (with one turn of surrounding context on each side), retry/reversal
+    turns, and fail-then-pass test transitions. Overlapping spans are
+    merged.
+
+    This only covers signals anchored to a specific turn. `trace.errors` is
+    a session-level list with no turn index to anchor to, so it is never
+    represented here — `render_salient_excerpt` renders it separately, as a
+    preface, not as a `SalientSpan`.
+    """
 
     raw_spans = [
         *_error_spans(trace),
@@ -236,6 +243,13 @@ def render_salient_excerpt(trace: SessionTrace, spans: list[SalientSpan]) -> str
     `[... N turns omitted ...]` marker standing in for each gap. This is
     the text that actually reaches the reflector prompt — never the raw
     transcript.
+
+    `trace.errors` (session-level, not turn-indexed) is never in `spans`
+    (see `find_salient_spans`), so it is prepended here as a distinct
+    "## Session-level errors" block, one line per entry, whenever
+    `trace.errors` is non-empty. This keeps the two signal sources —
+    per-turn spans and session-level errors — visually separate rather
+    than forcing the latter into fake turn indices.
     """
 
     merged = _merge_spans(spans)
@@ -253,4 +267,11 @@ def render_salient_excerpt(trace: SessionTrace, spans: list[SalientSpan]) -> str
     if cursor < total_turns:
         pieces.append(f"[... {total_turns - cursor} turns omitted ...]")
 
-    return "\n".join(pieces)
+    body = "\n".join(pieces)
+
+    if trace.errors:
+        error_lines = ["## Session-level errors", *(f"- {error}" for error in trace.errors)]
+        error_block = "\n".join(error_lines)
+        return f"{error_block}\n\n{body}" if body else error_block
+
+    return body

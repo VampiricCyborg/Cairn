@@ -199,3 +199,18 @@ def test_render_salient_excerpt_is_shorter_than_full_transcript_and_marks_gaps()
     assert "boom, it broke" in excerpt
     assert "reverting that change" in excerpt
     assert "routine filler turn number 10" not in excerpt
+
+
+def test_top_level_error_makes_session_reflectable_and_appears_in_excerpt() -> None:
+    trace = _make_trace(
+        turns=[_turn(f"routine turn {i}") for i in range(MIN_TURNS)],
+        errors=["some top-level failure"],
+    )
+
+    assert is_reflectable(trace, min_turns=MIN_TURNS)
+
+    spans = find_salient_spans(trace)
+    assert not any(span.reason == "error" for span in spans)
+
+    excerpt = render_salient_excerpt(trace, spans)
+    assert "some top-level failure" in excerpt
