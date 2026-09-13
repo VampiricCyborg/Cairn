@@ -107,13 +107,10 @@ class MockProvider:
     `max_candidates`, skipping anything that near-duplicates `known`.
     """
 
-    def __init__(self) -> None:
-        self._bodies: dict[str, str] = {}
-
     def extract(
         self, trace: SessionTrace, known: list[Entry], max_candidates: int
-    ) -> list[Entry]:
-        candidates: list[Entry] = []
+    ) -> list[tuple[Entry, str]]:
+        candidates: list[tuple[Entry, str]] = []
 
         for error_text in _collect_error_texts(trace):
             if len(candidates) >= max_candidates:
@@ -141,13 +138,7 @@ class MockProvider:
                 created=trace.ended_at,
                 updated=trace.ended_at,
             )
-            self._bodies[entry.id] = _render_body(error_text, related)
-            candidates.append(entry)
+            body = _render_body(error_text, related)
+            candidates.append((entry, body))
 
         return candidates
-
-    def body_for(self, entry_id: str) -> str | None:
-        """The Markdown body built for `entry_id` by the most recent
-        `extract()` call, or `None` if no such candidate was produced."""
-
-        return self._bodies.get(entry_id)

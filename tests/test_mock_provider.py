@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 from cairn.core.models import (
     Confidence,
+    Diff,
     Entry,
     EntryStatus,
     EntryType,
@@ -51,7 +52,7 @@ def test_extract_is_deterministic() -> None:
 
     assert first == second
     assert len(first) == 1
-    assert first[0].id.startswith("gotcha-")
+    assert first[0][0].id.startswith("gotcha-")
 
 
 def test_extract_respects_max_candidates() -> None:
@@ -62,7 +63,7 @@ def test_extract_respects_max_candidates() -> None:
 
     assert len(candidates) == 3
     # distinct errors produce distinct ids
-    assert len({entry.id for entry in candidates}) == 3
+    assert len({entry.id for entry, _ in candidates}) == 3
 
 
 def test_extract_skips_near_duplicate_of_known_entry() -> None:
@@ -82,6 +83,19 @@ def test_extract_entries_validate_against_entry_model() -> None:
     candidates = MockProvider().extract(trace, known=[], max_candidates=5)
 
     assert len(candidates) == 3
-    for entry in candidates:
+    for entry, body in candidates:
         assert Entry.model_validate(entry.model_dump(mode="json")) == entry
         assert entry.status is EntryStatus.STAGED
+        assert body.strip() != ""
+
+
+def test_extract_body_includes_error_and_related_diff() -> None:
+    error_text = "UndefinedColumn: users.last_seen_at does not exist (tests/conftest.py)"
+    trace = _trace([error_text], diffs=[Diff(file="tests/conftest.py", patch="@@ ...")])
+
+    candidates = MockProvider().extract(trace, known=[], max_candidates=5)
+
+    assert len(candidates) == 1
+    _, body = candidates[0]
+    assert error_text in body
+    assert "tests/conftest.py" in body

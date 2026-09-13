@@ -10,8 +10,9 @@ import typer
 from pydantic import ValidationError
 
 from cairn import __version__
-from cairn.core.models import Entry, EntryStatus, EntryType
+from cairn.core.models import Entry, EntryStatus, EntryType, SessionTrace
 from cairn.core.store import Store, StoreNotFoundError, load_entry
+from cairn.providers.mock import MockProvider
 
 app = typer.Typer(help="Cairn: harness-agnostic, git-native memory for coding agents.")
 
@@ -277,6 +278,47 @@ def context(
         _render_entry(entry, body) for entry, body in selected
     )
     typer.echo(block)
+
+
+@app.command()
+def reflect(
+    path: Path = typer.Argument(Path("."), help="Repository root containing `.cairn/`."),
+    trace: Path = typer.Option(..., "--trace", help="Path to a SessionTrace JSON file."),
+    max_candidates: int = typer.Option(
+        3, "--max-candidates", help="Maximum candidate entries to extract."
+    ),
+) -> None:
+    """Extract candidate entries from a session trace and stage them."""
+
+    cairn_root = path.resolve() / ".cairn"
+    try:
+        store = Store(cairn_root)
+    except StoreNotFoundError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    try:
+        raw = trace.read_text(encoding="utf-8")
+        session_trace = SessionTrace.model_validate(json.loads(raw))
+    except (OSError, json.JSONDecodeError, ValidationError) as exc:
+        typer.echo(f"error: could not load trace from {trace}: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    # TODO: read provider.name from config.toml once anthropic.py exists
+    provider = MockProvider()
+    candidates = provider.extract(
+        session_trace, known=store.approved(), max_candidates=max_candidates
+    )
+
+    if not candidates:
+        typer.echo("no candidates extracted")
+        return
+
+    for entry, body in candidates:
+        store.write_entry(entry, body)
+        typer.echo(f"staged {entry.id}: {entry.title}")
+
+    typer.echo(f"{len(candidates)} entries staged")
 
 
 if __name__ == "__main__":
