@@ -1,7 +1,5 @@
 """Deterministic mock provider, for CI and offline runs."""
 
-import hashlib
-
 from cairn.core.models import (
     Confidence,
     Diff,
@@ -11,17 +9,10 @@ from cairn.core.models import (
     Evidence,
     SessionTrace,
 )
+from cairn.providers.base import make_entry_id
 
 _TITLE_MAX_LEN = 100
 _DUPLICATE_WORD_OVERLAP = 0.6
-
-
-def _entry_id(entry_type: EntryType, seed: str) -> str:
-    """A stable id, `"{type}-{6 hex chars}"`, derived from `seed` — no
-    `uuid4`, so the same seed always produces the same id."""
-
-    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
-    return f"{entry_type.value}-{digest[:6]}"
 
 
 def _collect_error_texts(trace: SessionTrace) -> list[str]:
@@ -122,7 +113,7 @@ class MockProvider:
 
             related = _related_diffs(error_text, trace.diffs)
             entry = Entry(
-                id=_entry_id(EntryType.GOTCHA, f"{trace.session_id}:{error_text}"),
+                id=make_entry_id(EntryType.GOTCHA, f"{trace.session_id}:{error_text}"),
                 type=EntryType.GOTCHA,
                 title=title,
                 status=EntryStatus.STAGED,

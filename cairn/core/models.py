@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema"
 ENTRY_SCHEMA_ID = "https://cairn.dev/schema/entry.schema.json"
 TRACE_SCHEMA_ID = "https://cairn.dev/schema/trace.schema.json"
+CANDIDATE_ENTRY_SCHEMA_ID = "https://cairn.dev/schema/candidate-entry.schema.json"
 
 
 class EntryType(StrEnum):
@@ -103,6 +104,32 @@ class Entry(BaseModel):
     usage: Usage = Field(default_factory=Usage)
 
 
+class CandidateEntry(BaseModel):
+    """The part of an `Entry` a model is asked to produce, plus its Markdown body.
+
+    Everything else (`status`, `spec_version`, `evidence`, `created`,
+    `updated`, `supersedes`, `review`, `usage`) is filled in
+    deterministically by the provider, the same division of responsibility
+    `MockProvider` uses. The provider also replaces `id` with a generated
+    `"{type}-{6 hex chars}"` id, so a model can't collide with existing entries.
+    """
+
+    model_config = ConfigDict(extra="forbid", title="Cairn candidate entry")
+
+    id: str = Field(description="A short kebab-case slug for the lesson.")
+    type: EntryType
+    title: str = Field(description="One-line summary of the lesson.")
+    scope: list[str] = Field(
+        default_factory=list,
+        description='Glob patterns for the paths the lesson applies to, e.g. ["tests/**"].',
+    )
+    tags: list[str] = Field(
+        default_factory=list, description='Short free-form labels, e.g. ["testing", "database"].'
+    )
+    confidence: Confidence
+    body: str = Field(description="Markdown body grounded in the session's evidence.")
+
+
 class ToolCall(BaseModel):
     """A tool invocation made by the agent during a turn."""
 
@@ -176,4 +203,15 @@ def trace_json_schema() -> dict[str, Any]:
         "$schema": JSON_SCHEMA_DIALECT,
         "$id": TRACE_SCHEMA_ID,
         **SessionTrace.model_json_schema(),
+    }
+
+
+def candidate_entry_json_schema() -> dict[str, Any]:
+    """The JSON Schema 2020-12 document for `CandidateEntry`. Not checked into
+    `cairn/schema/`: it is the shape providers ask a model for, not a store format."""
+
+    return {
+        "$schema": JSON_SCHEMA_DIALECT,
+        "$id": CANDIDATE_ENTRY_SCHEMA_ID,
+        **CandidateEntry.model_json_schema(),
     }
