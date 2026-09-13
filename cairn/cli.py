@@ -55,8 +55,10 @@ max_output_tokens = 2000
 
 # Any OpenAI-compatible endpoint -- Groq shown, also works for OpenAI, Together, etc.
 # api_key_env names the environment variable holding the key; it is never written here.
+# Groq rotates its model lineup faster than most providers -- reconfirm the current
+# free-tier model name against https://console.groq.com/docs/models periodically.
 #   name         = "openai"
-#   model        = "llama-3.1-8b-instant"
+#   model        = "openai/gpt-oss-20b"
 #   base_url     = "https://api.groq.com/openai/v1"
 #   api_key_env  = "GROQ_API_KEY"
 
