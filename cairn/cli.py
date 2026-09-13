@@ -1,8 +1,12 @@
 """Typer entrypoint for the `cairn` CLI."""
 
+import copy
 import fnmatch
 import json
+import logging
+import os
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -12,18 +16,27 @@ import typer
 from pydantic import ValidationError
 
 from cairn import __version__
+from cairn.core.config import load_provider_name
+from cairn.core.curator import Curator
 from cairn.core.eval import DEFAULT_JUDGE_MODEL, evaluate_fixture, summarize
 from cairn.core.models import Entry, EntryStatus, EntryType, SessionTrace
+from cairn.core.normalizer import normalize_claude_code_transcript
 from cairn.core.store import Store, StoreNotFoundError, load_entry
 from cairn.providers.anthropic import AnthropicProvider
 from cairn.providers.base import Provider
 from cairn.providers.mock import MockProvider
 from cairn.review.cli_review import run_review
 
+logger = logging.getLogger(__name__)
+
 app = typer.Typer(help="Cairn: harness-agnostic, git-native memory for coding agents.")
+install_app = typer.Typer(help="Wire Cairn into a coding agent's hook/skill system.")
+app.add_typer(install_app, name="install")
 
 _SCHEMA_SRC_DIR = Path(__file__).resolve().parent / "schema"
 _SCHEMA_FILES = ("entry.schema.json", "trace.schema.json")
+_ADAPTERS_DIR = Path(__file__).resolve().parent / "adapters"
+_CLAUDE_CODE_ADAPTER_DIR = _ADAPTERS_DIR / "claude_code"
 
 _CONFIG_TOML_TEMPLATE = """# .cairn/config.toml
 spec_version = "0.1.0"
@@ -236,6 +249,62 @@ def _select_within_budget(items: list[tuple[Entry, str]], budget: int) -> list[t
     return selected
 
 
+def _resolve_provider(cairn_root: Path) -> Provider:
+    """The provider `cairn reflect` and the SessionStart queue sweep use:
+    `config.toml`'s `[provider].name` if it's `"anthropic"` and
+    `ANTHROPIC_API_KEY` is set in the environment, otherwise the offline
+    `MockProvider` -- never make a network call without both being true.
+    """
+
+    name = load_provider_name(cairn_root)
+    if name == "anthropic" and os.environ.get("ANTHROPIC_API_KEY"):
+        return AnthropicProvider()
+    return MockProvider()
+
+
+_QUEUE_SWEEP_MAX_CANDIDATES = 3
+
+
+def _sweep_queue(store: Store, provider: Provider) -> int:
+    """Drain `.cairn/queue/`: normalize each queued job's transcript, run it
+    through `provider`, stage the results via `Curator`, then remove the
+    queue file. Per the README's hook-safety principle, a bad job (a
+    missing transcript, a malformed job record, a normalizer error) is
+    caught and logged, never allowed to block the rest of the queue or the
+    context injection that follows the sweep. The queue file is removed
+    either way -- a permanently malformed job would otherwise be retried,
+    and fail identically, on every future session start.
+
+    Returns the number of jobs processed without error.
+    """
+
+    if not store.queue_dir.is_dir():
+        return 0
+
+    curator = Curator(store)
+    processed = 0
+    for job_path in sorted(store.queue_dir.glob("*.json")):
+        try:
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+            transcript_path = Path(str(job["transcript_path"]))
+            trace = normalize_claude_code_transcript(transcript_path)
+            candidates = provider.extract(
+                trace, known=store.approved(), max_candidates=_QUEUE_SWEEP_MAX_CANDIDATES
+            )
+            for entry, body in candidates:
+                result = curator.stage_candidate(entry, body)
+                logger.info(
+                    "queue sweep: %s from %s -> %s", entry.id, job_path.name, result.outcome
+                )
+            processed += 1
+        except Exception as exc:  # noqa: BLE001 - one bad job must never block the rest
+            logger.warning("queue sweep: skipping %s: %s", job_path.name, exc)
+        finally:
+            job_path.unlink(missing_ok=True)
+
+    return processed
+
+
 @app.command()
 def context(
     path: Path = typer.Argument(Path("."), help="Repository root containing `.cairn/`."),
@@ -244,6 +313,11 @@ def context(
         None, "--scope", help="Only include entries whose `scope` glob-matches this path."
     ),
     format: str = typer.Option("text", "--format", help="Output format: text or json."),
+    hook: bool = typer.Option(
+        False,
+        "--hook",
+        help="Sweep .cairn/queue/ first, then emit the SessionStart additionalContext JSON shape.",
+    ),
 ) -> None:
     """Render the approved-entry context block that would be injected into a session."""
 
@@ -258,18 +332,34 @@ def context(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
+    if hook:
+        _sweep_queue(store, _resolve_provider(cairn_root))
+
     items = _load_approved_entries(store)
     if scope is not None:
         items = [(entry, body) for entry, body in items if _scope_matches(entry, scope)]
 
     selected = _select_within_budget(items, budget)
 
+    if hook:
+        block = (
+            "# Project knowledge (Cairn)\n\n"
+            + "\n".join(_render_entry(entry, body) for entry, body in selected)
+            if selected
+            else ""
+        )
+        payload = {
+            "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": block}
+        }
+        typer.echo(json.dumps(payload))
+        return
+
     if format == "json":
-        payload = [
+        payload_list = [
             {"id": entry.id, "type": entry.type.value, "title": entry.title}
             for entry, _ in selected
         ]
-        typer.echo(json.dumps(payload))
+        typer.echo(json.dumps(payload_list))
         return
 
     if not selected:
@@ -306,8 +396,7 @@ def reflect(
         typer.echo(f"error: could not load trace from {trace}: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
-    # TODO: read provider.name from config.toml once anthropic.py exists
-    provider = MockProvider()
+    provider = _resolve_provider(cairn_root)
     candidates = provider.extract(
         session_trace, known=store.approved(), max_candidates=max_candidates
     )
@@ -492,6 +581,248 @@ def eval_suite(
         )
     typer.echo(_EVAL_PROXY_NOTE)
     typer.echo(f"wrote report to {report}")
+
+
+# -- install claude-code -------------------------------------------------------------
+
+
+def _is_cairn_session_end_hook(hook: dict[str, Any]) -> bool:
+    command = str(hook.get("command", "")).replace("\\", "/")
+    return command.endswith(".cairn/hooks/enqueue.sh")
+
+
+def _is_cairn_session_start_hook(hook: dict[str, Any]) -> bool:
+    args = hook.get("args")
+    return hook.get("command") == "cairn" and isinstance(args, list) and "--hook" in args
+
+
+_CAIRN_HOOK_MATCHERS: dict[str, Callable[[dict[str, Any]], bool]] = {
+    "SessionEnd": _is_cairn_session_end_hook,
+    "SessionStart": _is_cairn_session_start_hook,
+}
+
+
+def _merge_hooks(existing: dict[str, Any], template: dict[str, Any]) -> dict[str, Any]:
+    """Merge `template`'s `hooks.<event>` matcher-groups into `existing`'s
+    settings.
+
+    An already-registered Cairn hook (matched by `_CAIRN_HOOK_MATCHERS`,
+    not by position) is replaced in place, so running install twice is
+    idempotent rather than appending a duplicate. Otherwise the template's
+    matcher-group is appended alongside whatever is already registered for
+    that event. Every other key -- other events, other tools' matcher-groups,
+    unrelated top-level settings -- passes through untouched. Neither input
+    is mutated; a deep copy of `existing` is returned.
+    """
+
+    merged = copy.deepcopy(existing)
+    hooks = merged.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        hooks = {}
+        merged["hooks"] = hooks
+
+    for event, matcher in _CAIRN_HOOK_MATCHERS.items():
+        template_groups = template.get("hooks", {}).get(event, [])
+        if not template_groups:
+            continue
+        our_group = template_groups[0]
+        our_hook = our_group["hooks"][0]
+
+        existing_groups = hooks.setdefault(event, [])
+        replaced = False
+        for group in existing_groups:
+            group_hooks = group.get("hooks") if isinstance(group, dict) else None
+            if not isinstance(group_hooks, list):
+                continue
+            for index, existing_hook in enumerate(group_hooks):
+                if isinstance(existing_hook, dict) and matcher(existing_hook):
+                    group_hooks[index] = copy.deepcopy(our_hook)
+                    replaced = True
+                    break
+            if replaced:
+                break
+
+        if not replaced:
+            existing_groups.append(copy.deepcopy(our_group))
+
+    return merged
+
+
+@install_app.command(name="claude-code")
+def install_claude_code(
+    path: Path = typer.Argument(
+        Path("."), help="Repository root to install the Claude Code adapter into."
+    ),
+) -> None:
+    """Register Cairn's SessionEnd/SessionStart hooks and skill in Claude Code.
+
+    Merges into `.claude/settings.json` rather than overwriting it, and is
+    idempotent: running this twice does not duplicate hook entries.
+    """
+
+    repo_root = path.resolve()
+    cairn_root = repo_root / ".cairn"
+    if not cairn_root.is_dir():
+        typer.echo(f"error: {cairn_root} does not exist; run `cairn init` first", err=True)
+        raise typer.Exit(code=1)
+
+    template = json.loads((_CLAUDE_CODE_ADAPTER_DIR / "hooks.json").read_text(encoding="utf-8"))
+
+    claude_dir = repo_root / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    settings_path = claude_dir / "settings.json"
+
+    existing: dict[str, Any] = {}
+    if settings_path.is_file():
+        try:
+            loaded = json.loads(settings_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            typer.echo(f"error: {settings_path} is not valid JSON: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        if not isinstance(loaded, dict):
+            typer.echo(f"error: {settings_path} does not contain a JSON object", err=True)
+            raise typer.Exit(code=1)
+        existing = loaded
+
+    merged = _merge_hooks(existing, template)
+    settings_path.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+
+    hooks_dir = cairn_root / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    enqueue_dest = hooks_dir / "enqueue.sh"
+    shutil.copyfile(_CLAUDE_CODE_ADAPTER_DIR / "enqueue.sh", enqueue_dest)
+    enqueue_dest.chmod(0o755)
+
+    skill_dir = claude_dir / "skills" / "cairn"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    skill_dest = skill_dir / "SKILL.md"
+    shutil.copyfile(_CLAUDE_CODE_ADAPTER_DIR / "SKILL.md", skill_dest)
+
+    typer.echo(f"Installed Claude Code adapter at {repo_root}")
+    typer.echo(f"  hooks         {settings_path}")
+    typer.echo(f"  enqueue hook  {enqueue_dest}")
+    typer.echo(f"  skill         {skill_dest}")
+
+
+# -- doctor ----------------------------------------------------------------------
+
+
+def _read_spec_version(cairn_root: Path) -> str:
+    version_file = cairn_root / "VERSION"
+    if version_file.is_file():
+        return version_file.read_text(encoding="utf-8").strip() or "unknown"
+    return "unknown"
+
+
+def _doctor_store_line(cairn_root: Path) -> str:
+    try:
+        store = Store(cairn_root)
+    except StoreNotFoundError:
+        return f"FAIL store            {cairn_root} not found — run `cairn init`"
+    approved = len(store.approved())
+    staged = len(store.load_all(status=EntryStatus.STAGED))
+    return (
+        f"PASS store            .cairn/ present, schema {_read_spec_version(cairn_root)}, "
+        f"{approved} entries, {staged} staged"
+    )
+
+
+def _doctor_git_line(repo_root: Path) -> str:
+    if not (repo_root / ".git").exists():
+        return "WARN git              no .git directory found here"
+    gitignore = repo_root / ".gitignore"
+    ignored = (
+        gitignore.is_file()
+        and ".cairn/queue/" in gitignore.read_text(encoding="utf-8").splitlines()
+    )
+    if ignored:
+        return "PASS git              repository detected, .cairn/queue ignored"
+    return (
+        "WARN git              repository detected, .cairn/queue not gitignored — run `cairn init`"
+    )
+
+
+def _doctor_provider_line(cairn_root: Path) -> str:
+    name = load_provider_name(cairn_root)
+    if name != "anthropic":
+        return f"PASS provider         {name}"
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return "PASS provider         anthropic, key found in env"
+    return "WARN provider         anthropic, ANTHROPIC_API_KEY not set"
+
+
+def _doctor_claude_code_line(repo_root: Path) -> str:
+    settings_path = repo_root / ".claude" / "settings.json"
+    if not settings_path.is_file():
+        return "WARN claude-code      not installed — run `cairn install claude-code`"
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return f"FAIL claude-code      {settings_path} is not valid JSON"
+    if not isinstance(settings, dict):
+        return f"FAIL claude-code      {settings_path} does not contain a JSON object"
+
+    hooks = settings.get("hooks")
+    hooks = hooks if isinstance(hooks, dict) else {}
+
+    def _has_cairn_hook(event: str, matcher: Callable[[dict[str, Any]], bool]) -> bool:
+        groups = hooks.get(event) or []
+        return any(
+            matcher(hook)
+            for group in groups
+            if isinstance(group, dict)
+            for hook in group.get("hooks", [])
+            if isinstance(hook, dict)
+        )
+
+    has_end = _has_cairn_hook("SessionEnd", _is_cairn_session_end_hook)
+    has_start = _has_cairn_hook("SessionStart", _is_cairn_session_start_hook)
+
+    install_hint = "run `cairn install claude-code`"
+    if has_end and has_start:
+        return "PASS claude-code      SessionEnd + SessionStart hooks registered"
+    if has_end:
+        return f"WARN claude-code      SessionEnd registered, SessionStart missing — {install_hint}"
+    if has_start:
+        return f"WARN claude-code      SessionStart registered, SessionEnd missing — {install_hint}"
+    return f"WARN claude-code      hooks not registered — {install_hint}"
+
+
+def _doctor_opencode_line(repo_root: Path) -> str:
+    plugin = repo_root / ".opencode" / "plugins" / "cairn.ts"
+    if plugin.is_file():
+        return f"PASS opencode         plugin linked at {plugin}"
+    return "WARN opencode         no plugin found — run `cairn install opencode`"
+
+
+def _doctor_agents_md_line(repo_root: Path) -> str:
+    agents_md = repo_root / "AGENTS.md"
+    if not agents_md.is_file():
+        return "WARN agents-md        no AGENTS.md found — run: cairn install agents-md"
+    if "cairn:begin" in agents_md.read_text(encoding="utf-8"):
+        return "PASS agents-md        pointer block present"
+    return (
+        "WARN agents-md        AGENTS.md found, no Cairn pointer block — "
+        "run: cairn install agents-md"
+    )
+
+
+@app.command()
+def doctor(
+    path: Path = typer.Argument(Path("."), help="Repository root containing `.cairn/`."),
+) -> None:
+    """Check that the store, git integration, provider, and adapters are wired up correctly."""
+
+    repo_root = path.resolve()
+    cairn_root = repo_root / ".cairn"
+
+    typer.echo(f"cairn {__version__}  ·  spec {_read_spec_version(cairn_root)}")
+    typer.echo(_doctor_store_line(cairn_root))
+    typer.echo(_doctor_git_line(repo_root))
+    typer.echo(_doctor_provider_line(cairn_root))
+    typer.echo(_doctor_claude_code_line(repo_root))
+    typer.echo(_doctor_opencode_line(repo_root))
+    typer.echo(_doctor_agents_md_line(repo_root))
 
 
 if __name__ == "__main__":

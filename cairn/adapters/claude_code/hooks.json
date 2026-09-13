@@ -1,1 +1,28 @@
-{}
+{
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.cairn/hooks/enqueue.sh",
+            "args": [],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cairn",
+            "args": ["context", "--hook", "--budget", "1500"],
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
