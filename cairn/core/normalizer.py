@@ -1,23 +1,36 @@
-"""Claude Code transcript (JSONL) to canonical `SessionTrace`.
+"""Harness transcripts to canonical `SessionTrace`.
 
-Deliberately narrow: this reads exactly the shape Claude Code writes to the
-path a `SessionStart`/`SessionEnd` hook receives as `transcript_path` — one
-JSON object per line, `type` `"user"` or `"assistant"`, a nested `message`
-whose `content` is either a plain string or a list of content blocks
-(`text`, `tool_use`, `tool_result`). Building a general multi-harness
-transcript format is future adapter work, not this module's job; see
-`cairn.core.models.SessionTrace` for the canonical shape every harness's
-normalizer converges on.
+`normalize()` is the harness dispatch every caller (the CLI's SessionStart
+queue sweep, `cairn reflect`) should go through; the per-harness functions
+below it are the actual parsers, each deliberately narrow to the one shape
+its harness's capture adapter hands off. See `cairn.core.models.SessionTrace`
+for the canonical shape every normalizer converges on.
 
-Claude Code's own transcript never bundles a tool call and its result on
-one record the way `SessionTrace.Turn` does (`tool_calls` and `tool_results`
-together) — the call comes in an `assistant` record and its result in the
-*next* `user` record. This module's main job is reassembling that pair back
-onto a single `Turn`, keyed by `tool_use_id`.
+Claude Code writes one JSON object per line to the path a
+`SessionStart`/`SessionEnd` hook receives as `transcript_path` -- `type`
+`"user"` or `"assistant"`, a nested `message` whose `content` is either a
+plain string or a list of content blocks (`text`, `tool_use`,
+`tool_result`). Its transcript never bundles a tool call and its result on
+one record the way `SessionTrace.Turn` does (`tool_calls` and
+`tool_results` together) -- the call comes in an `assistant` record and its
+result in the *next* `user` record. `normalize_claude_code_transcript`'s
+main job is reassembling that pair back onto a single `Turn`, keyed by
+`tool_use_id`.
+
+opencode has no equivalent flat transcript file (see
+`cairn/adapters/opencode/plugin.ts`'s module docstring for why): its
+capture adapter instead writes the verbatim JSON response of the
+`@opencode-ai/sdk` call `client.session.messages({ path: { id } })` --
+confirmed against opencode's published SDK types (checked 2026-09-14,
+package version 1.18.30) -- an array of `{info: Message, parts: Part[]}`
+records. `normalize_opencode_transcript` parses that shape directly; unlike
+Claude Code it needs no call/result reassembly, since a tool call and its
+result already live on the same `ToolPart` via `state.status`.
 """
 
 import json
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -220,3 +233,152 @@ def normalize_claude_code_transcript(path: Path, *, harness: str = "claude-code"
         diffs=diffs,
         outcome=_infer_outcome(turns),
     )
+
+
+def _opencode_turn(info: dict[str, object], parts: list[object]) -> Turn | None:
+    """One `Turn` from an opencode `{info, parts}` record, or `None` if
+    `info.role` isn't `"user"`/`"assistant"` (nothing else appears in
+    `client.session.messages`' response per the confirmed `Message` union)."""
+
+    role = info.get("role")
+    if role not in ("user", "assistant"):
+        return None
+
+    text_parts: list[str] = []
+    tool_calls: list[ToolCall] = []
+    tool_results: list[ToolResult] = []
+
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        part_type = part.get("type")
+
+        if part_type == "text":
+            text = part.get("text")
+            if isinstance(text, str):
+                text_parts.append(text)
+            continue
+
+        if part_type != "tool":
+            continue
+        name = part.get("tool")
+        state = part.get("state")
+        if not isinstance(name, str) or not isinstance(state, dict):
+            continue
+        tool_input = state.get("input")
+        tool_calls.append(
+            ToolCall(name=name, input=tool_input if isinstance(tool_input, dict) else {})
+        )
+        status = state.get("status")
+        if status == "completed":
+            tool_results.append(ToolResult(name=name, output=state.get("output"), is_error=False))
+        elif status == "error":
+            tool_results.append(ToolResult(name=name, output=state.get("error"), is_error=True))
+        # "pending"/"running" have no result yet -- nothing to record.
+
+    return Turn(
+        role=TurnRole.USER if role == "user" else TurnRole.ASSISTANT,
+        content="\n".join(text_parts),
+        tool_calls=tool_calls,
+        tool_results=tool_results,
+    )
+
+
+def normalize_opencode_transcript(path: Path, *, harness: str = "opencode") -> SessionTrace:
+    """Parse the JSON array opencode's capture adapter writes -- the
+    verbatim response of `client.session.messages({ path: { id } })`, an
+    array of `{info: Message, parts: Part[]}` records -- into a canonical
+    `SessionTrace`. See this module's docstring for how that shape was
+    confirmed and why opencode has no flat transcript file to read instead.
+
+    A malformed record is skipped, not fatal, for the same reason
+    `normalize_claude_code_transcript` skips a malformed line. Raises
+    `OSError` if `path` can't be read, or `ValueError` if its content
+    isn't the expected JSON array.
+
+    opencode has no unified-diff equivalent at this layer: a `patch` part
+    (`{type: "patch", hash, files}`) names which files changed but carries
+    no diff text, so `diffs` is always empty here rather than fabricated
+    from a tool call's `input` -- see SPEC.md's evidence-backed criterion.
+    Likewise, an `AssistantMessage.error` is preserved verbatim as its JSON
+    string in `errors` rather than picked apart into fields this module
+    hasn't confirmed.
+    """
+
+    try:
+        records = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{path}: not valid JSON") from exc
+    if not isinstance(records, list):
+        raise ValueError(f"{path}: expected a JSON array of {{info, parts}} records")
+
+    turns: list[Turn] = []
+    errors: list[str] = []
+    timestamps_ms: list[float] = []
+    session_id: str | None = None
+
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        info = record.get("info")
+        parts = record.get("parts")
+        if not isinstance(info, dict) or not isinstance(parts, list):
+            continue
+
+        if session_id is None and isinstance(info.get("sessionID"), str):
+            session_id = info["sessionID"]
+
+        time_field = info.get("time")
+        created = time_field.get("created") if isinstance(time_field, dict) else None
+        if isinstance(created, int | float):
+            timestamps_ms.append(created)
+
+        error = info.get("error")
+        if isinstance(error, dict):
+            errors.append(json.dumps(error, sort_keys=True))
+
+        turn = _opencode_turn(info, parts)
+        if turn is not None:
+            turns.append(turn)
+
+    if timestamps_ms:
+        started_at = datetime.fromtimestamp(min(timestamps_ms) / 1000, tz=UTC)
+        ended_at = datetime.fromtimestamp(max(timestamps_ms) / 1000, tz=UTC)
+    else:
+        started_at = ended_at = datetime.now(UTC)
+
+    return SessionTrace(
+        session_id=session_id or path.stem.removesuffix(".transcript"),
+        harness=harness,
+        started_at=started_at,
+        ended_at=ended_at,
+        turns=turns,
+        errors=errors,
+        diffs=[],
+        outcome=_infer_outcome(turns),
+    )
+
+
+_NORMALIZERS: dict[str, Callable[[Path], SessionTrace]] = {
+    "claude-code": normalize_claude_code_transcript,
+    "opencode": normalize_opencode_transcript,
+}
+
+
+def normalize(transcript_path: Path, harness: str) -> SessionTrace:
+    """Dispatch to the normalizer registered for `harness`.
+
+    This is the entry point queue consumers (the CLI's SessionStart sweep,
+    `cairn reflect`) should call rather than importing a harness-specific
+    function directly, so adding a harness means adding one entry to
+    `_NORMALIZERS`, not touching every caller.
+
+    Raises `ValueError` for a harness with no normalizer registered; callers
+    are expected to catch this the same way they catch a malformed job
+    record or a missing transcript.
+    """
+
+    normalizer = _NORMALIZERS.get(harness)
+    if normalizer is None:
+        raise ValueError(f"no normalizer registered for harness {harness!r}")
+    return normalizer(transcript_path)

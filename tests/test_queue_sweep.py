@@ -165,6 +165,80 @@ def test_job_pointing_at_missing_transcript_is_skipped_not_fatal(tmp_path: Path)
     assert list(store.staging_dir.glob("*.md")) == []
 
 
+def _write_opencode_transcript_with_error(path: Path, session_id: str) -> None:
+    records = [
+        {
+            "info": {
+                "id": "msg-1",
+                "sessionID": session_id,
+                "role": "user",
+                "time": {"created": 1700000000000},
+            },
+            "parts": [{"type": "text", "text": "Run the migration."}],
+        },
+        {
+            "info": {
+                "id": "msg-2",
+                "sessionID": session_id,
+                "role": "assistant",
+                "time": {"created": 1700000060000},
+            },
+            "parts": [
+                {"type": "text", "text": "Running the test suite."},
+                {
+                    "type": "tool",
+                    "tool": "bash",
+                    "state": {
+                        "status": "error",
+                        "input": {"command": "pytest -q"},
+                        "error": "UndefinedColumn: users.last_seen_at does not exist",
+                        "time": {"start": 1, "end": 2},
+                    },
+                },
+            ],
+        },
+    ]
+    path.write_text(json.dumps(records), encoding="utf-8")
+
+
+def _write_opencode_job(store: Store, session_id: str, transcript_path: Path) -> Path:
+    store.queue_dir.mkdir(parents=True, exist_ok=True)
+    job_path = store.queue_dir / f"{session_id}.json"
+    job_path.write_text(
+        json.dumps(
+            {
+                "session_id": session_id,
+                "transcript_path": str(transcript_path),
+                "harness": "opencode",
+                "enqueued_at": "2026-01-01T10:05:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return job_path
+
+
+def test_hook_sweeps_an_opencode_job_using_the_opencode_normalizer(tmp_path: Path) -> None:
+    """The sweep dispatches on the job's `harness` field -- an opencode job's
+    transcript (the JSON `{info, parts}` array shape, not Claude Code's
+    JSONL) must be parsed by the opencode normalizer, not the default."""
+
+    store = _init(tmp_path)
+    transcript = tmp_path / "sess-oc.transcript.json"
+    _write_opencode_transcript_with_error(transcript, "sess-oc-1")
+    job_path = _write_opencode_job(store, "sess-oc-1", transcript)
+
+    result = runner.invoke(app, ["context", str(tmp_path), "--hook"])
+
+    assert result.exit_code == 0, result.output
+    assert not job_path.exists()
+    staged_files = list(store.staging_dir.glob("*.md"))
+    assert len(staged_files) == 1
+    entry = load_entry(staged_files[0])
+    assert entry.evidence.session_id == "sess-oc-1"
+    assert entry.evidence.harness == "opencode"
+
+
 def test_plain_context_without_hook_does_not_sweep_queue(tmp_path: Path) -> None:
     """Only `--hook` triggers the sweep; a plain `cairn context` (e.g. a
     manual preview) must not have the side effect of draining the queue."""

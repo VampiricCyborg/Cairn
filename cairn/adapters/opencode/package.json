@@ -1,0 +1,13 @@
+{
+  "name": "cairn-opencode-adapter",
+  "private": true,
+  "description": "Type-checks plugin.ts against the real @opencode-ai/plugin types, so a breaking change in opencode's plugin surface fails this build instead of failing silently at runtime.",
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.18.30",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.3"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}

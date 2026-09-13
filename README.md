@@ -770,7 +770,7 @@ The portability claim is only proven when a **second** harness reads the store w
 | Harness | Capture | Inject | Status |
 |---|---|---|---|
 | Claude Code | `SessionEnd` + `PreCompact` hooks | `SessionStart` hook → `additionalContext` | Reference implementation |
-| opencode | Plugin `event` hook on session idle | System-prompt transform or `AGENTS.md` pointer | Planned — verify hook names against your installed version; the plugin API surface has moved and unknown hook keys are silently ignored |
+| opencode | Plugin `event` hook on `session.idle`, writes `.cairn/queue/<id>.json` via `cairn install opencode` | `AGENTS.md` pointer (no dedicated system-prompt transform yet) | Capture implemented, confirmed against `@opencode-ai/sdk` 1.18.30 — `cairn doctor` warns if your installed `opencode --version` is older than that; re-verify and bump `cairn.cli._OPENCODE_MIN_VERSION` if the plugin surface moves |
 | Codex CLI | `cairn capture` on the session log | `AGENTS.md` pointer block | Planned |
 | Cursor | Manual `cairn capture` | `.cursor/rules/cairn.mdc` generated from `CONTEXT.md` | Planned |
 | Copilot / Gemini CLI / Windsurf / Aider | Manual | `AGENTS.md` pointer block | Free via the file convention |

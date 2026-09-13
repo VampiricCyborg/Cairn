@@ -5,7 +5,9 @@ import fnmatch
 import json
 import logging
 import os
+import re
 import shutil
+import subprocess
 import tomllib
 from collections.abc import Callable
 from pathlib import Path
@@ -21,7 +23,7 @@ from cairn.core.config import load_provider_name
 from cairn.core.curator import Curator
 from cairn.core.eval import DEFAULT_JUDGE_MODEL, evaluate_fixture, summarize
 from cairn.core.models import Entry, EntryStatus, EntryType, SessionTrace
-from cairn.core.normalizer import normalize_claude_code_transcript
+from cairn.core.normalizer import normalize
 from cairn.core.store import Store, StoreNotFoundError, load_entry
 from cairn.providers.anthropic import AnthropicProvider
 from cairn.providers.base import Provider, ProviderUnavailableError
@@ -39,6 +41,13 @@ _SCHEMA_SRC_DIR = Path(__file__).resolve().parent / "schema"
 _SCHEMA_FILES = ("entry.schema.json", "trace.schema.json")
 _ADAPTERS_DIR = Path(__file__).resolve().parent / "adapters"
 _CLAUDE_CODE_ADAPTER_DIR = _ADAPTERS_DIR / "claude_code"
+_OPENCODE_ADAPTER_DIR = _ADAPTERS_DIR / "opencode"
+
+#: The opencode CLI version `cairn/adapters/opencode/plugin.ts` was last
+#: verified against (its `session.idle` event shape and `client.session.messages`
+#: response shape, per `cairn.core.normalizer.normalize_opencode_transcript`'s
+#: docstring). Bump this after re-verifying the adapter against a newer release.
+_OPENCODE_MIN_VERSION = "1.18.30"
 
 _CONFIG_TOML_TEMPLATE = """# .cairn/config.toml
 spec_version = "0.1.0"
@@ -314,7 +323,7 @@ def _sweep_queue(store: Store, provider: Provider) -> int:
         try:
             job = json.loads(job_path.read_text(encoding="utf-8"))
             transcript_path = Path(str(job["transcript_path"]))
-            trace = normalize_claude_code_transcript(transcript_path)
+            trace = normalize(transcript_path, harness=str(job.get("harness", "claude-code")))
             candidates = provider.extract(
                 trace, known=store.approved(), max_candidates=_QUEUE_SWEEP_MAX_CANDIDATES
             )
@@ -740,6 +749,39 @@ def install_claude_code(
     typer.echo(f"  skill         {skill_dest}")
 
 
+# -- install opencode --------------------------------------------------------------
+
+
+@install_app.command(name="opencode")
+def install_opencode(
+    path: Path = typer.Argument(
+        Path("."), help="Repository root to install the opencode adapter into."
+    ),
+) -> None:
+    """Link Cairn's session-idle capture plugin into opencode.
+
+    Unlike Claude Code's hooks, which need a JSON registration merged into
+    `.claude/settings.json`, opencode auto-discovers local plugins dropped
+    into `.opencode/plugins/` (https://opencode.ai/docs/plugins) -- no
+    config file to merge. Copying the same plugin source on top of itself
+    is naturally idempotent.
+    """
+
+    repo_root = path.resolve()
+    cairn_root = repo_root / ".cairn"
+    if not cairn_root.is_dir():
+        typer.echo(f"error: {cairn_root} does not exist; run `cairn init` first", err=True)
+        raise typer.Exit(code=1)
+
+    plugins_dir = repo_root / ".opencode" / "plugins"
+    plugins_dir.mkdir(parents=True, exist_ok=True)
+    plugin_dest = plugins_dir / "cairn.ts"
+    shutil.copyfile(_OPENCODE_ADAPTER_DIR / "plugin.ts", plugin_dest)
+
+    typer.echo(f"Installed opencode adapter at {repo_root}")
+    typer.echo(f"  plugin        {plugin_dest}")
+
+
 # -- doctor ----------------------------------------------------------------------
 
 
@@ -824,11 +866,59 @@ def _doctor_claude_code_line(repo_root: Path) -> str:
     return f"WARN claude-code      hooks not registered — {install_hint}"
 
 
+def _parse_version(text: str) -> tuple[int, ...] | None:
+    """Best-effort dotted-integer version parse, e.g. `"1.18.30"` ->
+    `(1, 18, 30)`. `None` for anything without a leading digit run (a
+    missing binary, an unexpected `--version` format, etc.) -- callers
+    treat that as "nothing to check," not a failure."""
+
+    match = re.match(r"(\d+(?:\.\d+)*)", text.strip())
+    if not match:
+        return None
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
+def _check_opencode_version() -> str | None:
+    """`None` if the installed opencode CLI is at or above
+    `_OPENCODE_MIN_VERSION` -- the version `plugin.ts` was verified against
+    -- or if opencode isn't on PATH or its version can't be parsed (there is
+    nothing to warn about yet in either case). A short warning string
+    otherwise.
+
+    This exists because opencode's plugin surface has moved before, per the
+    README's adapter-surface-drift risk: a `cairn doctor` on an opencode
+    install older than what this adapter was built against should say so,
+    rather than silently assuming `session.idle` and `client.session.messages`
+    still behave the way `cairn.core.normalizer.normalize_opencode_transcript`
+    expects.
+    """
+
+    try:
+        result = subprocess.run(
+            ["opencode", "--version"], capture_output=True, text=True, timeout=5, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+    installed = _parse_version(result.stdout) or _parse_version(result.stderr)
+    minimum = _parse_version(_OPENCODE_MIN_VERSION)
+    if installed is None or minimum is None or installed >= minimum:
+        return None
+    return (
+        f"opencode {'.'.join(map(str, installed))} is older than {_OPENCODE_MIN_VERSION}, "
+        "the version this adapter was last verified against"
+    )
+
+
 def _doctor_opencode_line(repo_root: Path) -> str:
     plugin = repo_root / ".opencode" / "plugins" / "cairn.ts"
-    if plugin.is_file():
-        return f"PASS opencode         plugin linked at {plugin}"
-    return "WARN opencode         no plugin found — run `cairn install opencode`"
+    if not plugin.is_file():
+        return "WARN opencode         no plugin found — run `cairn install opencode`"
+
+    version_warning = _check_opencode_version()
+    if version_warning:
+        return f"WARN opencode         plugin linked at {plugin}; {version_warning}"
+    return f"PASS opencode         plugin linked at {plugin}"
 
 
 def _doctor_agents_md_line(repo_root: Path) -> str:

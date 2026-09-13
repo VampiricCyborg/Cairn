@@ -38,3 +38,20 @@ jobs:
         run: uv sync --all-extras
       - name: Pytest
         run: uv run pytest -q
+
+  opencode-plugin:
+    runs-on: ubuntu-latest
+    # Type-checks cairn/adapters/opencode/plugin.ts against the real,
+    # published @opencode-ai/plugin types -- the "test that fails loudly
+    # when the surface moves" the README requires for every adapter.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install adapter devDependencies
+        working-directory: cairn/adapters/opencode
+        run: npm install
+      - name: Typecheck plugin.ts
+        working-directory: cairn/adapters/opencode
+        run: npm run typecheck

@@ -11,3 +11,6 @@ wheels/
 
 #extras
 /documentation
+
+# TypeScript adapter tooling
+node_modules/
