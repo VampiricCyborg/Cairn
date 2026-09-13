@@ -81,9 +81,7 @@ def test_store_requires_existing_cairn_dir(tmp_path: Path) -> None:
 def test_load_all_returns_all_valid_entries(tmp_path: Path) -> None:
     store = Store(_new_store_root(tmp_path))
 
-    for index, entry_type in enumerate(
-        [EntryType.STRATEGY, EntryType.GOTCHA, EntryType.FACT]
-    ):
+    for index, entry_type in enumerate([EntryType.STRATEGY, EntryType.GOTCHA, EntryType.FACT]):
         entry = _make_entry(
             id=f"{entry_type.value}-{index:06x}", type=entry_type, title=f"Entry {index}"
         )

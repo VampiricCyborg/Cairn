@@ -178,9 +178,7 @@ def validate(
         else:
             typer.echo(f"PASS {entry_file}")
 
-    typer.echo(
-        f"{len(files)} entries checked, {failures} failed, {warned} warned"
-    )
+    typer.echo(f"{len(files)} entries checked, {failures} failed, {warned} warned")
 
     if failures or (strict and warned):
         raise typer.Exit(code=1)
@@ -215,9 +213,7 @@ def _render_entry(entry: Entry, body: str) -> str:
     return f"## [{entry.type.value}] {entry.title}\n\n{body.strip()}\n"
 
 
-def _select_within_budget(
-    items: list[tuple[Entry, str]], budget: int
-) -> list[tuple[Entry, str]]:
+def _select_within_budget(items: list[tuple[Entry, str]], budget: int) -> list[tuple[Entry, str]]:
     """Greedily keep entries, in order, while the running approximate token
     count (`len(text) // 4`) stays within `budget`. Approximate because it
     counts characters, not real tokens."""

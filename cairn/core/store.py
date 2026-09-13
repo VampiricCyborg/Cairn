@@ -96,8 +96,7 @@ class Store:
             entry = load_entry(path)
             if entry.type is not expected_type:
                 logger.warning(
-                    "skipping %s: frontmatter type %r does not match its "
-                    "directory (expected %r)",
+                    "skipping %s: frontmatter type %r does not match its directory (expected %r)",
                     path,
                     entry.type.value,
                     expected_type.value,

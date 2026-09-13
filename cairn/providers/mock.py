@@ -54,8 +54,7 @@ def _render_body(error_text: str, related: list[Diff]) -> str:
     if related:
         files = "\n".join(f"- {diff.file}" for diff in related)
         what_to_do = (
-            "Review the changes below, made in the same session, for the likely "
-            f"cause:\n\n{files}"
+            f"Review the changes below, made in the same session, for the likely cause:\n\n{files}"
         )
     else:
         what_to_do = "Investigate the error above; no diff in this session touched a related file."

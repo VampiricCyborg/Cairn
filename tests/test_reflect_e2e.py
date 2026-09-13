@@ -26,9 +26,7 @@ def _init(tmp_path: Path) -> None:
 def test_reflect_stages_valid_entries_from_trace(tmp_path: Path) -> None:
     _init(tmp_path)
 
-    result = runner.invoke(
-        app, ["reflect", str(tmp_path), "--trace", str(_FIXTURE)]
-    )
+    result = runner.invoke(app, ["reflect", str(tmp_path), "--trace", str(_FIXTURE)])
 
     assert result.exit_code == 0, result.output
     assert f"{_FIXTURE_DISTINCT_ERRORS} entries staged" in result.output

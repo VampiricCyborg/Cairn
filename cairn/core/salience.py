@@ -142,9 +142,7 @@ def _retry_and_reversal_spans(trace: SessionTrace) -> list[SalientSpan]:
     return spans
 
 
-def _test_transition_spans(
-    trace: SessionTrace, max_span_length: int
-) -> list[SalientSpan]:
+def _test_transition_spans(trace: SessionTrace, max_span_length: int) -> list[SalientSpan]:
     """A span from a failing-test turn to the later turn where that same
     test (or file) is reported passing, capped at `max_span_length` turns
     so one stale failure can't drag half the session into the excerpt. A

@@ -161,9 +161,7 @@ class TestContext:
             scope=["tests/**"],
         )
         _write_entry(cairn_root / "entries" / "fact", entry_a, "a.md", body="Fact body.")
-        _write_entry(
-            cairn_root / "entries" / "strategy", entry_b, "b.md", body="Strategy body."
-        )
+        _write_entry(cairn_root / "entries" / "strategy", entry_b, "b.md", body="Strategy body.")
 
         text_result = runner.invoke(app, ["context", str(tmp_path)])
         assert text_result.exit_code == 0, text_result.output
