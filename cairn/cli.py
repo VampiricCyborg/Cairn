@@ -18,6 +18,7 @@ from cairn.core.store import Store, StoreNotFoundError, load_entry
 from cairn.providers.anthropic import AnthropicProvider
 from cairn.providers.base import Provider
 from cairn.providers.mock import MockProvider
+from cairn.review.cli_review import run_review
 
 app = typer.Typer(help="Cairn: harness-agnostic, git-native memory for coding agents.")
 
@@ -320,6 +321,26 @@ def reflect(
         typer.echo(f"staged {entry.id}: {entry.title}")
 
     typer.echo(f"{len(candidates)} entries staged")
+
+
+@app.command()
+def review(
+    path: Path = typer.Argument(Path("."), help="Repository root containing `.cairn/`."),
+) -> None:
+    """Interactively approve, edit, merge, reject, or skip staged candidates."""
+
+    cairn_root = path.resolve() / ".cairn"
+    try:
+        store = Store(cairn_root)
+    except StoreNotFoundError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    try:
+        run_review(store)
+    except ValidationError as exc:
+        typer.echo(f"error: a staged entry is invalid; run `cairn validate`: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
 
 
 _EVAL_MAX_CANDIDATES = 3
