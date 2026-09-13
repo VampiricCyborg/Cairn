@@ -1,0 +1,10 @@
+[
+  {
+    "title": "Set APP_ENV at the top of tests/conftest.py, before any app import, not in a fixture",
+    "type": "gotcha",
+    "scope": ["tests/conftest.py", "app/db.py", "app/config.py"],
+    "tags": ["testing", "pytest", "configuration", "database"],
+    "confidence": "high",
+    "body": "## What happens\n\n`app/db.py` builds its SQLAlchemy `engine` at import time from `get_settings()` in `app/config.py`, which reads `APP_ENV` once and is `@lru_cache`d. pytest imports `tests/conftest.py`, and through it `app.db`, during collection, before any fixture runs. When `APP_ENV` is set inside a fixture, the engine is already bound to the dev database, and tests fail with `psycopg.OperationalError: ... password authentication failed for user \"ledger_dev\"`.\n\nCI does not show this because `.github/workflows/test.yml` sets `APP_ENV: test` for the whole job.\n\n## Why the obvious fix does not work\n\nCalling `get_settings.cache_clear()` in the fixture refreshes the settings object but not the module-level `engine` that was already built from the old one.\n\n## What to do\n\nAssign `os.environ[\"APP_ENV\"] = \"test\"` on the first lines of `tests/conftest.py`, above every `app.*` import. Assign it rather than using `setdefault`, so a shell that exports `APP_ENV=dev` does not win.\n"
+  }
+]

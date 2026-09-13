@@ -4,14 +4,19 @@ import fnmatch
 import json
 import shutil
 from pathlib import Path
+from typing import Any
 
+import anthropic
 import frontmatter
 import typer
 from pydantic import ValidationError
 
 from cairn import __version__
+from cairn.core.eval import DEFAULT_JUDGE_MODEL, evaluate_fixture, summarize
 from cairn.core.models import Entry, EntryStatus, EntryType, SessionTrace
 from cairn.core.store import Store, StoreNotFoundError, load_entry
+from cairn.providers.anthropic import AnthropicProvider
+from cairn.providers.base import Provider
 from cairn.providers.mock import MockProvider
 
 app = typer.Typer(help="Cairn: harness-agnostic, git-native memory for coding agents.")
@@ -315,6 +320,157 @@ def reflect(
         typer.echo(f"staged {entry.id}: {entry.title}")
 
     typer.echo(f"{len(candidates)} entries staged")
+
+
+_EVAL_MAX_CANDIDATES = 3
+_EVAL_PROXY_NOTE = (
+    "precision/non-redundant are judge- and match-scored, not human-verified — see README's "
+    "Evaluation section for why this is a proxy, not ground truth."
+)
+
+
+def _anthropic_client() -> anthropic.Anthropic:
+    """The client `cairn eval` judges with (and, without `--mock`, extracts
+    with). A seam for tests, which replace it so no API call is made."""
+
+    return anthropic.Anthropic()
+
+
+def _discover_fixture_pairs(suite: Path) -> list[tuple[Path, Path]]:
+    """`(session_trace_N.json, gold_N.json)` pairs in `suite`, ordered by `N`.
+    Raises `FileNotFoundError` if a trace has no matching gold file."""
+
+    def order(path: Path) -> tuple[int, str]:
+        suffix = path.stem.removeprefix("session_trace_")
+        return (int(suffix) if suffix.isdigit() else 2**31, suffix)
+
+    pairs = []
+    for trace_path in sorted(suite.glob("session_trace_*.json"), key=order):
+        suffix = trace_path.stem.removeprefix("session_trace_")
+        gold_path = suite / f"gold_{suffix}.json"
+        if not gold_path.is_file():
+            raise FileNotFoundError(f"{trace_path.name} has no matching {gold_path.name}")
+        pairs.append((trace_path, gold_path))
+    return pairs
+
+
+def _load_gold(path: Path) -> list[dict[str, Any]]:
+    gold = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(gold, list) or not all(
+        isinstance(item, dict) and isinstance(item.get("title"), str) and item["title"].strip()
+        for item in gold
+    ):
+        raise ValueError("expected a JSON list of objects, each with a non-empty `title`")
+    return gold
+
+
+def _format_metric(metric: dict[str, Any]) -> str:
+    if metric["rate"] is None:
+        return "n/a (0/0)"
+    return f"{metric['rate']:.1%} ({metric['numerator']}/{metric['denominator']})"
+
+
+@app.command(name="eval")
+def eval_suite(
+    suite: Path = typer.Option(
+        ..., "--suite", help="Directory of session_trace_N.json / gold_N.json pairs."
+    ),
+    report: Path = typer.Option(
+        Path("eval-report.json"), "--report", help="Where to write the per-candidate JSON report."
+    ),
+    mock: bool = typer.Option(
+        False,
+        "--mock",
+        help="Extract candidates with the offline MockProvider. The judge still calls the "
+        "Anthropic API.",
+    ),
+) -> None:
+    """Score extracted candidates against a suite of gold fixtures."""
+
+    try:
+        pairs = _discover_fixture_pairs(suite)
+    except FileNotFoundError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    if not pairs:
+        typer.echo(f"error: no session_trace_*.json fixtures in {suite}", err=True)
+        raise typer.Exit(code=1)
+
+    client = _anthropic_client()
+    provider: Provider
+    if mock:
+        provider = MockProvider()
+        modes = {"extraction": "mock", "judge": "anthropic", "judge_model": DEFAULT_JUDGE_MODEL}
+        typer.echo(
+            "warning: mixed modes. Extraction uses the offline MockProvider, but the judge "
+            f"still calls the Anthropic API ({DEFAULT_JUDGE_MODEL})."
+        )
+    else:
+        anthropic_provider = AnthropicProvider(client=client)
+        provider = anthropic_provider
+        modes = {
+            "extraction": "anthropic",
+            "extraction_model": anthropic_provider.model,
+            "judge": "anthropic",
+            "judge_model": DEFAULT_JUDGE_MODEL,
+        }
+        typer.echo(
+            f"mode: extraction ({anthropic_provider.model}) and judge ({DEFAULT_JUDGE_MODEL}) "
+            "both call the Anthropic API."
+        )
+
+    emitted: list[Entry] = []
+    fixtures: list[dict[str, Any]] = []
+    for trace_path, gold_path in pairs:
+        try:
+            trace = SessionTrace.model_validate(json.loads(trace_path.read_text(encoding="utf-8")))
+            gold = _load_gold(gold_path)
+        except (OSError, ValueError) as exc:
+            typer.echo(f"error: could not load fixture {trace_path.name}: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+
+        try:
+            candidates = provider.extract(
+                trace, known=list(emitted), max_candidates=_EVAL_MAX_CANDIDATES
+            )
+        except anthropic.APIError as exc:
+            typer.echo(f"error: extraction failed for {trace_path.name}: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+
+        result = evaluate_fixture(candidates, gold, client, known=emitted)
+        fixtures.append(
+            {
+                "trace": trace_path.name,
+                "gold": gold_path.name,
+                "session_id": trace.session_id,
+                **result,
+            }
+        )
+        emitted.extend(entry for entry, _ in candidates)
+        typer.echo(
+            f"{trace_path.name}: {len(candidates)} candidates, "
+            f"{len(result['matched_gold_titles'])}/{result['gold_count']} gold entries matched"
+        )
+
+    summary = summarize(fixtures)
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text(
+        json.dumps({"modes": modes, "summary": summary, "fixtures": fixtures}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    typer.echo("")
+    typer.echo(f"schema validity  {_format_metric(summary['schema_validity'])}")
+    typer.echo(f"precision        {_format_metric(summary['precision'])}")
+    typer.echo(f"recall           {_format_metric(summary['recall'])}")
+    typer.echo(f"duplicate rate   {_format_metric(summary['duplicate_rate'])}")
+    if summary["judge_errors"]:
+        typer.echo(
+            f"warning: {summary['judge_errors']} judge call(s) failed; those candidates count "
+            "as not passing all seven criteria (see judge_error in the report)"
+        )
+    typer.echo(_EVAL_PROXY_NOTE)
+    typer.echo(f"wrote report to {report}")
 
 
 if __name__ == "__main__":

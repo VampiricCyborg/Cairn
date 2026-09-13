@@ -1,0 +1,10 @@
+[
+  {
+    "title": "Stream large test fixtures with tidepool.io.iter_ndjson instead of loading them into memory",
+    "type": "strategy",
+    "scope": ["tests/**", "tests/fixtures/large/**", "tidepool/io.py"],
+    "tags": ["testing", "performance", "memory", "fixtures"],
+    "confidence": "high",
+    "body": "## What works\n\nTests over the exports in `tests/fixtures/large/` (for example `events_2m.ndjson.gz`, about 2M lines) should stream them through `tidepool.io.iter_ndjson(path)`, which yields one decoded event per line and handles gzip, and consume the events incrementally, for dedupe through `Deduper.feed()` in `tidepool/ingest.py`. Streamed, the full-file dedupe test peaks at about 180 MB RSS.\n\nLoading the file with `gzip.open(...).read().splitlines()` or into a list of `json.loads` results takes several GB. Under `pytest -n 4` in CI the xdist worker is killed, and pytest reports only `[gw1] node down: Not properly terminated`, with no Python traceback.\n\n## Why the obvious fix does not work\n\nTesting a slice, such as the first 100k lines, fits in memory but misses the cross-day duplicates near the end of the export, which are what these tests exist to catch.\n\n## What to do\n\nIn any test that reads a file under `tests/fixtures/large/`, iterate `iter_ndjson(path)` and keep only the aggregate state the assertion needs. Do not collect the events into a list.\n"
+  }
+]

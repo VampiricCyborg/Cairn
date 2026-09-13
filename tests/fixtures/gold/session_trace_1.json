@@ -1,0 +1,118 @@
+{
+  "session_id": "4e1d7a2c-93b8-4f0e-a6c1-5d2b8e7f9a13",
+  "harness": "claude-code",
+  "started_at": "2026-08-21T14:02:00Z",
+  "ended_at": "2026-08-21T14:38:00Z",
+  "outcome": "success",
+  "turns": [
+    {
+      "role": "user",
+      "content": "tests/test_invoices.py fails on my machine with a database auth error, but CI is green on the same commit. Can you find out why?",
+      "tool_calls": [],
+      "tool_results": []
+    },
+    {
+      "role": "assistant",
+      "content": "Reproducing it first.",
+      "tool_calls": [
+        {"name": "Bash", "input": {"command": "pytest tests/test_invoices.py -q"}}
+      ],
+      "tool_results": [
+        {
+          "name": "Bash",
+          "output": "E   psycopg.OperationalError: connection failed: connection to server at \"127.0.0.1\", port 5432 failed: FATAL:  password authentication failed for user \"ledger_dev\"\n\nFAILED tests/test_invoices.py::test_create_invoice - psycopg.OperationalError: connection failed\nFAILED tests/test_invoices.py::test_void_invoice - psycopg.OperationalError: connection failed\n2 failed, 10 passed in 2.87s\n",
+          "is_error": true
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": "The tests are connecting as ledger_dev, the dev database role; the test role is ledger_test. Looking at how the test environment gets selected.",
+      "tool_calls": [
+        {"name": "Read", "input": {"file_path": "tests/conftest.py"}},
+        {"name": "Read", "input": {"file_path": "app/db.py"}},
+        {"name": "Read", "input": {"file_path": "app/config.py"}}
+      ],
+      "tool_results": [
+        {
+          "name": "Read",
+          "output": "import os\n\nimport pytest\n\nfrom app.db import SessionLocal\n\n\n@pytest.fixture(scope=\"session\", autouse=True)\ndef test_env():\n    os.environ[\"APP_ENV\"] = \"test\"\n    yield\n",
+          "is_error": false
+        },
+        {
+          "name": "Read",
+          "output": "from sqlalchemy import create_engine\nfrom sqlalchemy.orm import sessionmaker\n\nfrom app.config import get_settings\n\nengine = create_engine(get_settings().database_url)\nSessionLocal = sessionmaker(bind=engine)\n",
+          "is_error": false
+        },
+        {
+          "name": "Read",
+          "output": "@lru_cache\ndef get_settings() -> Settings:\n    env = os.environ.get(\"APP_ENV\", \"dev\")\n    return Settings(_env_file=f\".env.{env}\")\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": "get_settings() is lru_cached, so the fixture's APP_ENV change is probably being ignored. Clearing the cache in the fixture right after setting APP_ENV.",
+      "tool_calls": [
+        {
+          "name": "Edit",
+          "input": {
+            "file_path": "tests/conftest.py",
+            "old_string": "    os.environ[\"APP_ENV\"] = \"test\"\n",
+            "new_string": "    os.environ[\"APP_ENV\"] = \"test\"\n    get_settings.cache_clear()\n"
+          }
+        },
+        {"name": "Bash", "input": {"command": "pytest tests/test_invoices.py -q"}}
+      ],
+      "tool_results": [
+        {"name": "Edit", "output": "Edited tests/conftest.py", "is_error": false},
+        {
+          "name": "Bash",
+          "output": "E   psycopg.OperationalError: connection failed: connection to server at \"127.0.0.1\", port 5432 failed: FATAL:  password authentication failed for user \"ledger_dev\"\n\nFAILED tests/test_invoices.py::test_create_invoice - psycopg.OperationalError: connection failed\nFAILED tests/test_invoices.py::test_void_invoice - psycopg.OperationalError: connection failed\n2 failed, 10 passed in 2.91s\n",
+          "is_error": true
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": "That didn't work, and the reason is ordering, not caching. app/db.py calls get_settings() at module level to build `engine`, and pytest imports tests/conftest.py, which imports app.db, during collection, before any fixture runs. By the time test_env sets APP_ENV the engine is already bound to the dev URL, and clearing the settings cache does not rebuild it. Reverting the cache_clear and setting APP_ENV on the first lines of tests/conftest.py, above every app import.",
+      "tool_calls": [
+        {
+          "name": "Edit",
+          "input": {
+            "file_path": "tests/conftest.py",
+            "old_string": "import os\n\nimport pytest\n",
+            "new_string": "import os\n\nos.environ[\"APP_ENV\"] = \"test\"  # before any app import: app/db.py builds its engine at import time\n\nimport pytest\n"
+          }
+        },
+        {"name": "Bash", "input": {"command": "pytest tests/test_invoices.py -q"}}
+      ],
+      "tool_results": [
+        {"name": "Edit", "output": "Edited tests/conftest.py", "is_error": false},
+        {"name": "Bash", "output": "12 passed in 3.04s\n", "is_error": false}
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": "CI stayed green because .github/workflows/test.yml sets APP_ENV: test for the whole job, so the variable already exists before pytest starts. Only local runs without APP_ENV exported hit the dev database.",
+      "tool_calls": [
+        {"name": "Read", "input": {"file_path": ".github/workflows/test.yml"}}
+      ],
+      "tool_results": [
+        {
+          "name": "Read",
+          "output": "jobs:\n  test:\n    runs-on: ubuntu-latest\n    env:\n      APP_ENV: test\n    steps:\n      - uses: actions/checkout@v4\n      - run: pytest -q\n",
+          "is_error": false
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "diffs": [
+    {
+      "file": "tests/conftest.py",
+      "patch": "@@ -1,12 +1,8 @@\n import os\n \n+os.environ[\"APP_ENV\"] = \"test\"  # before any app import: app/db.py builds its engine at import time\n+\n import pytest\n \n from app.db import SessionLocal\n-\n-\n-@pytest.fixture(scope=\"session\", autouse=True)\n-def test_env():\n-    os.environ[\"APP_ENV\"] = \"test\"\n-    yield\n"
+    }
+  ]
+}

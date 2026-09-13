@@ -9,10 +9,10 @@ from cairn.core.models import (
     Evidence,
     SessionTrace,
 )
+from cairn.core.similarity import DUPLICATE_WORD_OVERLAP, title_overlap
 from cairn.providers.base import make_entry_id
 
 _TITLE_MAX_LEN = 100
-_DUPLICATE_WORD_OVERLAP = 0.6
 
 
 def _collect_error_texts(trace: SessionTrace) -> list[str]:
@@ -62,30 +62,11 @@ def _render_body(error_text: str, related: list[Diff]) -> str:
     return f"## What happens\n\n{error_text}\n\n## What to do\n\n{what_to_do}\n"
 
 
-def _word_set(text: str) -> set[str]:
-    return {word for word in text.lower().split() if word}
-
-
 def _is_near_duplicate(title: str, known: list[Entry]) -> bool:
-    """A crude substring/word-overlap check. Real near-duplicate detection
-    (rapidfuzz-backed) is the Curator's job in P2/P3."""
+    """A crude substring/word-overlap check (see `title_overlap`). Real
+    near-duplicate detection (rapidfuzz-backed) is the Curator's job in P2/P3."""
 
-    candidate_lower = title.lower()
-    candidate_words = _word_set(title)
-
-    for entry in known:
-        known_lower = entry.title.lower()
-        if candidate_lower in known_lower or known_lower in candidate_lower:
-            return True
-
-        known_words = _word_set(entry.title)
-        if not candidate_words or not known_words:
-            continue
-        smaller = min(len(candidate_words), len(known_words))
-        if len(candidate_words & known_words) / smaller >= _DUPLICATE_WORD_OVERLAP:
-            return True
-
-    return False
+    return any(title_overlap(title, entry.title) >= DUPLICATE_WORD_OVERLAP for entry in known)
 
 
 class MockProvider:

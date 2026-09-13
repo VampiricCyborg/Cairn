@@ -1,0 +1,15 @@
+[
+  {
+    "title": "The integration-test Redis is on host port 6380, not 6379",
+    "type": "fact",
+    "scope": [
+      "docker-compose.test.yml",
+      "services/api/.env.test",
+      "services/api/src/**",
+      "services/api/test/integration/**"
+    ],
+    "tags": ["redis", "testing", "docker", "configuration"],
+    "confidence": "high",
+    "body": "## Integration-test Redis port\n\n`docker-compose.test.yml` publishes the test stack's Redis on host port 6380 (`\"6380:6379\"`) so it can run alongside the dev stack from `docker-compose.yml`, which keeps 6379. `services/api/.env.test` sets `REDIS_URL=redis://localhost:6380` to match.\n\nCode that hard-codes `redis://localhost:6379` works against the dev stack but fails under `pnpm --filter api test:integration` with `Error: connect ECONNREFUSED 127.0.0.1:6379`.\n\n## What to do\n\nIn `services/api`, get a Redis client from `getRedis()` in `src/lib/redis.ts`, which reads `REDIS_URL`, instead of constructing one from a literal URL.\n"
+  }
+]
