@@ -19,7 +19,11 @@ import typer
 from pydantic import ValidationError
 
 from cairn import __version__
-from cairn.core.config import HumanApprovalRequiredError, load_provider_name
+from cairn.core.config import (
+    HumanApprovalRequiredError,
+    human_approval_problem,
+    load_provider_name,
+)
 from cairn.core.curator import CurationResult, Curator
 from cairn.core.eval import DEFAULT_JUDGE_MODEL, evaluate_fixture, summarize
 from cairn.core.models import Entry, EntryStatus, EntryType, SessionTrace
@@ -861,6 +865,20 @@ def _doctor_provider_line(cairn_root: Path) -> str:
     return "WARN provider         anthropic, ANTHROPIC_API_KEY not set"
 
 
+def _doctor_review_gate_line(cairn_root: Path) -> str:
+    """The `[review] require_human_approval` row.
+
+    A FAIL here is not cosmetic: `cairn review` refuses outright while the
+    gate is off, so nothing can reach `entries/` at all (see
+    `cairn.core.config.enforce_human_approval`).
+    """
+
+    problem = human_approval_problem(cairn_root)
+    if problem is None:
+        return "PASS review           human approval required before anything reaches entries/"
+    return f"FAIL review           {problem} — `cairn review` will refuse"
+
+
 def _doctor_claude_code_line(repo_root: Path) -> str:
     settings_path = repo_root / ".claude" / "settings.json"
     if not settings_path.is_file():
@@ -978,6 +996,7 @@ def doctor(
     typer.echo(_doctor_store_line(cairn_root))
     typer.echo(_doctor_git_line(repo_root))
     typer.echo(_doctor_provider_line(cairn_root))
+    typer.echo(_doctor_review_gate_line(cairn_root))
     typer.echo(_doctor_claude_code_line(repo_root))
     typer.echo(_doctor_opencode_line(repo_root))
     typer.echo(_doctor_agents_md_line(repo_root))

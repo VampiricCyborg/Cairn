@@ -42,10 +42,16 @@ class HumanApprovalRequiredError(Exception):
     not set `[review] require_human_approval = true`."""
 
 
-def _human_approval_problem(config_path: Path) -> str | None:
-    """Why `[review].require_human_approval` is not enabled in `config_path`,
-    or `None` if it is the boolean `true`."""
+def human_approval_problem(cairn_root: Path) -> str | None:
+    """Why `[review] require_human_approval` is not enabled under `cairn_root`,
+    as a short phrase, or `None` if it is the boolean `true`.
 
+    `enforce_human_approval` turns this into a refusal; `cairn doctor` reports
+    it as a row, which is why the phrase stands on its own without the
+    remediation sentence the exception adds.
+    """
+
+    config_path = cairn_root / "config.toml"
     if not config_path.is_file():
         return "config.toml does not exist"
 
@@ -80,7 +86,7 @@ def enforce_human_approval(cairn_root: Path) -> None:
     """
 
     config_path = cairn_root / "config.toml"
-    problem = _human_approval_problem(config_path)
+    problem = human_approval_problem(cairn_root)
     if problem is not None:
         raise HumanApprovalRequiredError(
             f"refusing to write to entries/: {problem}. Set `require_human_approval = true` "

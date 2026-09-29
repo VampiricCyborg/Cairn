@@ -14,3 +14,11 @@ wheels/
 
 # TypeScript adapter tooling
 node_modules/
+
+# Stray signal files from the `claude-notify-extension` Stop/Notification/
+# PermissionRequest hooks in ~/.claude/settings.json. Their commands are
+# `touch C:\Users\Madhav\.claude\claude-notify-signals\<signal>`, but Claude
+# Code runs hooks through Git Bash, where `\U`, `\M`, `\c` etc. are escapes:
+# the backslashes are eaten, the path collapses to one relative filename, and
+# `touch` creates it in whatever directory the session is running in.
+/C:*

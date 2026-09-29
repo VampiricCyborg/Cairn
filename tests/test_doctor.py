@@ -135,3 +135,40 @@ def test_reports_opencode_pass_when_at_or_above_verified_version(
 
     assert result.exit_code == 0, result.output
     assert "PASS opencode         plugin linked at" in result.output
+
+
+def test_reports_review_gate_enabled_by_init(tmp_path: Path) -> None:
+    _init(tmp_path)
+
+    result = runner.invoke(app, ["doctor", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "PASS review           human approval required" in result.output
+
+
+def test_reports_review_gate_disabled(tmp_path: Path) -> None:
+    _init(tmp_path)
+    config_path = tmp_path / ".cairn" / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "require_human_approval = true", "require_human_approval = false"
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["doctor", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "FAIL review" in result.output
+    assert "require_human_approval is false" in result.output
+    assert "will refuse" in result.output
+
+
+def test_reports_review_gate_fail_when_config_absent(tmp_path: Path) -> None:
+    _init(tmp_path)
+    (tmp_path / ".cairn" / "config.toml").unlink()
+
+    result = runner.invoke(app, ["doctor", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "FAIL review" in result.output

@@ -20,9 +20,9 @@ _CAIRN_PACKAGE = Path(__file__).resolve().parent.parent / "cairn"
 _CAPTURED_AT = datetime(2026, 9, 12, 11, 0, 0, tzinfo=UTC)
 
 #: The modules allowed to call `Store.write_trusted`, as `cairn/`-relative
-#: paths. Each must enforce `[review] require_human_approval` first (see
-#: `cairn.core.config.enforce_human_approval`); adding a module here means
-#: giving it that gate.
+#: paths. A module belongs here only once it calls
+#: `cairn.core.config.enforce_human_approval` before writing: the list records
+#: which modules have gated themselves, it does not grant permission.
 _TRUSTED_WRITERS = ("review/cli_review.py",)
 
 
@@ -110,8 +110,11 @@ def test_only_the_review_flow_calls_write_trusted() -> None:
     callers = _callers_of("write_trusted")
 
     assert callers == set(_TRUSTED_WRITERS), (
-        f"write_trusted callers are {sorted(callers)}, expected exactly {list(_TRUSTED_WRITERS)}; "
-        "only the review flow may write to entries/"
+        f"write_trusted callers are {sorted(callers)}, expected exactly "
+        f"{list(_TRUSTED_WRITERS)}. Nothing reaches entries/ except through an explicit human "
+        "approval, so a new caller must call cairn.core.config.enforce_human_approval before it "
+        "writes. Widening this list is not the fix for a failing build: it is the last step after "
+        "the new caller gates itself."
     )
 
 
