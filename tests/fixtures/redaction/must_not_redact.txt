@@ -1,0 +1,79 @@
+# MUST_NOT_REDACT — every line must survive the redactor untouched.
+#
+# Harvested from this repository's own Claude Code transcripts, plus the exact
+# samples the entropy-first redactor destroyed. These are the material an entry
+# needs to be "evidence-backed": if the reflector cannot see the path, the
+# error, or the code, it cannot cite them.
+#
+# Lines beginning with # are comments. Blank lines are ignored.
+
+# --- the observed regressions that motivated the precision ladder ---
+Binary file tests/__pycache__/test_curator.cpython-313-pytest-9.1.1.pyc matches
+tool_result(Edit, ok): The file C:\Users\Madhav\PROJECTS\productions\Cairn\cairn\cli.py has been updated successfully.
+f"  staged for review    {by_action[ReviewAction.STAGED]:>5}",
+f"gate-drop rate         {_rate(drops_total, len(extraction), 'extracted')}",
+
+# --- Windows paths ---
+C:\Users\Madhav\PROJECTS\productions\Cairn\tests\test_store_write_surface.py
+C:\Users\Madhav\.claude\projects\C--Users-Madhav-PROJECTS-productions-Cairn\9b769bb3-370e-484a-befd-bc0703027d4d.jsonl
+C:\Users\Madhav\PROJECTS\productions\Cairn\.venv\Scripts\python.exe
+C:\Users\Madhav\AppData\Local\Temp\pytest-of-Madhav\pytest-131\test_a_clone_of_the_committed_0
+
+# --- POSIX paths ---
+/c/Users/Madhav/PROJECTS/productions/Cairn
+tests/fixtures/gold/session_trace_1.json
+cairn/adapters/claude_code/enqueue.py
+.cairn/entries/gotcha/2026-09-12-migration-order-7b21.md
+~/.claude/projects/C--Users-Madhav-PROJECTS-productions-Cairn
+./scripts/generate_schemas.py
+
+# --- git SHAs and hashes (provenance, not secrets) ---
+54b4aac
+3a45ff5
+89b1595e
+9d3f1ab2c4e6f8a0b1c2d3e4f5a6b7c8d9e0f1a2
+4f1a9c2e8b7d6a5f4e3d2c1b0a9f8e7d6c5b4a3928170615243342516078e9c2
+excerpt_sha256: 4f1a9c2e8b7d6a5f4e3d2c1b0a9f8e7d6c5b4a3928170615243342516078e9c2
+
+# --- session UUIDs ---
+c19937f1-97e5-4222-b00a-75e418988943
+0f3c1a9e-6b2d-4f77-9a10-2d4c8e51b3aa
+"sessionId":"2963f827-19b5-43eb-8d56-90ce101afc22"
+
+# --- URLs ---
+https://github.com/VampiricCyborg/Cairn.git
+https://cairn.dev/schema/entry.schema.json
+https://json-schema.org/draft/2020-12/schema
+https://console.groq.com/docs/models
+https://api.groq.com/openai/v1
+
+# --- dotted code identifiers ---
+sqlalchemy.exc.ProgrammingError
+cairn.core.normalizer.normalize_opencode_transcript
+cairn.providers.base.ProviderUnavailableError
+psycopg2.errors.UndefinedColumn
+_provider(client).extract(_reflectable_trace
+client.messages.create.return_value
+
+# --- ruff / mypy / pytest output ---
+E501 Line too long (107 > 100)
+--> tests\test_store_write_surface.py:112:101
+Success: no issues found in 13 source files
+tests/test_doctor_executes.py::test_a_clone_of_the_committed_store_validates
+FAILED tests/test_stats_review.py::test_merge_counts_as_an_approval
+296 passed in 24.24s
+sqlalchemy.exc.ProgrammingError: (psycopg2.errors.UndefinedColumn) column "users.last_seen_at" does not exist
+
+# --- package and config identifiers ---
+@opencode-ai/plugin
+claude-haiku-4-5-20251001
+claude-sonnet-4-6
+qwen2.5-coder:14b
+openai/gpt-oss-20b
+2.52.0.windows.1
+commit.gpgsign=false
+backwards-compatibility
+files_with_matches
+
+# --- base64-ish but harmless: a data URI of a 1x1 gif, no credential ---
+iVBORw0KGgoAAAANSUhEUg

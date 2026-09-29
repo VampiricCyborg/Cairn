@@ -182,7 +182,7 @@ def test_trace_is_redacted_before_it_reaches_the_api() -> None:
     prompt = client.messages.create.call_args.kwargs["messages"][0]["content"]
     assert "UndefinedColumn: users.last_seen_at" in prompt
     assert SECRET not in prompt
-    assert "[REDACTED:sk]" in prompt
+    assert "[REDACTED:" in prompt
 
 
 def test_response_exceeding_max_candidates_is_truncated_in_code() -> None:

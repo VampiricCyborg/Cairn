@@ -1,0 +1,46 @@
+# MUST_REDACT — every line must have its secret removed by the redactor.
+#
+# EVERY VALUE HERE IS FAKE, and no literal credential is stored in this file.
+# The random-looking parts are written as placeholders and expanded by the test
+# loader, so the committed bytes contain no secret-shaped string at all.
+#
+# That is not decoration. The first version of this file used literal fake
+# tokens, and GitHub push protection rejected the push: its GitLab and Slack
+# detectors matched. Templating keeps the fixtures structurally realistic
+# enough to exercise the patterns honestly while leaving nothing in git history
+# that a scanner -- or a human skimming the diff -- has to evaluate. Never
+# paste a real key here: this file is committed, and a committed secret is a
+# leaked secret.
+#
+# Placeholders, expanded by tests/test_redaction_corpus.py:
+#   {fN}  N characters of mixed-case letters and digits
+#   {uN}  N characters of uppercase letters and digits
+#   {lN}  N characters of lowercase letters and digits
+#
+# Lines beginning with # are comments. Blank lines are ignored.
+# Format: <secret><TAB><the full line it appears in>
+
+sk-ant-api03-{f48}	Sure, use this key sk-ant-api03-{f48} to authenticate.
+sk-proj-{f32}	export OPENAI_KEY=sk-proj-{f32}
+sk-{l30}	legacy key sk-{l30} in the old config
+ghp_{f36}	auth failed for ghp_{f36}
+gho_{f36}	oauth token gho_{f36} rejected
+github_pat_{f22}_{f59}	remote: github_pat_{f22}_{f59}
+AKIA{u16}	AKIA{u16} found in output
+ASIA{u16}	temporary creds ASIA{u16} expired
+glpat-{f20}	CI_TOKEN=glpat-{f20}
+xoxb-{l12}-{l12}-{f24}	slack said xoxb-{l12}-{l12}-{f24} is invalid
+AIza{f35}	maps key AIza{f35} quota exceeded
+npm_{f36}	npm ERR! npm_{f36} unauthorized
+sk_live_{f24}	charge failed with sk_live_{f24}
+SG.{f22}.{f43}	mail key SG.{f22}.{f43}
+hf_{f34}	hub login hf_{f34}
+PMAK-{f24}	postman PMAK-{f24}
+-----BEGIN RSA PRIVATE KEY-----	-----BEGIN RSA PRIVATE KEY----- MIIEow...
+eyJ{f16}.eyJ{f16}.{f27}	Authorization header carried eyJ{f16}.eyJ{f16}.{f27}
+postgres://dbuser:{l14}@db.internal:5432/app	DATABASE_URL=postgres://dbuser:{l14}@db.internal:5432/app
+api_key = "{f26}"	config had api_key = "{f26}" committed by mistake
+password: correcthorsebatterystaple	the yaml said password: correcthorsebatterystaple
+aws_secret_access_key = {f40}	profile line aws_secret_access_key = {f40}
+Bearer {f34}	curl -H "Authorization: Bearer {f34}"
+{f40}	the vendor emitted {f40} with no documented prefix

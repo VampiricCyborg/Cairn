@@ -95,7 +95,7 @@ def test_named_pattern_redacted_with_surrounding_text_preserved() -> None:
     content = redacted.turns[0].content
 
     assert secret not in content
-    assert content.startswith("Sure, use this key [REDACTED:sk]")
+    assert content.startswith("Sure, use this key [REDACTED:sk-key]")
     assert content.endswith("to authenticate the client.")
 
 
@@ -114,7 +114,7 @@ def test_tool_result_output_is_stringified_and_redacted() -> None:
 
     redacted = _redactor().redact_trace(trace)
 
-    assert redacted.turns[0].tool_results[0].output == "[REDACTED:AKIA] found in output"
+    assert redacted.turns[0].tool_results[0].output == "[REDACTED:aws-key-id] found in output"
 
 
 def test_errors_are_redacted() -> None:
@@ -122,7 +122,7 @@ def test_errors_are_redacted() -> None:
 
     redacted = _redactor().redact_trace(trace)
 
-    assert redacted.errors == ["auth failed for [REDACTED:ghp]"]
+    assert redacted.errors == ["auth failed for [REDACTED:github-token]"]
 
 
 def test_entropy_check_catches_unknown_secret_format() -> None:
@@ -130,7 +130,7 @@ def test_entropy_check_catches_unknown_secret_format() -> None:
         turns=[
             Turn(
                 role=TurnRole.TOOL,
-                content=f"leaked token: {HIGH_ENTROPY_UNKNOWN_SECRET} in logs",
+                content=f"the vendor emitted {HIGH_ENTROPY_UNKNOWN_SECRET} in logs",
             )
         ]
     )
@@ -140,7 +140,7 @@ def test_entropy_check_catches_unknown_secret_format() -> None:
 
     assert HIGH_ENTROPY_UNKNOWN_SECRET not in content
     assert "[REDACTED:high-entropy]" in content
-    assert content == "leaked token: [REDACTED:high-entropy] in logs"
+    assert content == "the vendor emitted [REDACTED:high-entropy] in logs"
 
 
 def test_entropy_check_does_not_flag_normal_english_text() -> None:

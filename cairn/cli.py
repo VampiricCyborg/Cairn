@@ -112,7 +112,11 @@ include_types   = ["strategy", "gotcha", "fact"]
 
 [redaction]
 deny_globs = [".env*", "**/secrets/**", "**/*.pem", "**/*.key"]
-patterns   = ["sk-[A-Za-z0-9]{{20,}}", "ghp_[A-Za-z0-9]{{36}}", "AKIA[0-9A-Z]{{16}}"]
+# Cairn always applies a built-in set of known secret formats (Anthropic,
+# OpenAI, GitHub, AWS, GitLab, Slack, Google, npm, Stripe, SendGrid, JWTs,
+# private keys, credentials in URLs, and explicit key/token assignments).
+# Anything listed here is added to that set, never a replacement for it.
+patterns   = []
 
 [review]
 require_human_approval = true        # v0 refuses to run without this
