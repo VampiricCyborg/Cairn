@@ -19,7 +19,7 @@ import typer
 from pydantic import ValidationError
 
 from cairn import __version__
-from cairn.core.config import load_provider_name
+from cairn.core.config import HumanApprovalRequiredError, load_provider_name
 from cairn.core.curator import CurationResult, Curator
 from cairn.core.eval import DEFAULT_JUDGE_MODEL, evaluate_fixture, summarize
 from cairn.core.models import Entry, EntryStatus, EntryType, SessionTrace
@@ -501,6 +501,9 @@ def review(
 
     try:
         run_review(store)
+    except HumanApprovalRequiredError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
     except ValidationError as exc:
         typer.echo(f"error: a staged entry is invalid; run `cairn validate`: {exc}", err=True)
         raise typer.Exit(code=1) from exc

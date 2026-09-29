@@ -48,6 +48,7 @@ from rich.console import Console, Group
 from rich.panel import Panel
 from rich.text import Text
 
+from cairn.core.config import enforce_human_approval
 from cairn.core.models import Entry, EntryStatus, Review
 from cairn.core.store import Store
 
@@ -144,6 +145,10 @@ class ReviewSession:
         repo_root: Path | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
+        # This class owns every write to entries/, so the gate lives at its
+        # door: a store that doesn't require human approval never gets a
+        # session, before any candidate is shown or touched.
+        enforce_human_approval(store.root)
         self.store = store
         self.console = console or Console(highlight=False)
         self.repo_root = repo_root or store.root.parent

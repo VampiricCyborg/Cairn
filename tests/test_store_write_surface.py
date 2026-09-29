@@ -4,7 +4,7 @@ Nothing that extracts or stages candidates can write into `entries/`:
 `Store.write_staged` only ever writes `staging/` and refuses any entry that
 is not `staged`; the one method that writes `entries/`, `Store.write_trusted`,
 refuses `staged` entries and is only callable from the review flow -- which
-the AST test below enforces for every module under `cairn/`.
+the AST tests below enforce for every module under `cairn/`.
 """
 
 import ast
@@ -19,8 +19,11 @@ from cairn.core.store import Store, StoreError
 _CAIRN_PACKAGE = Path(__file__).resolve().parent.parent / "cairn"
 _CAPTURED_AT = datetime(2026, 9, 12, 11, 0, 0, tzinfo=UTC)
 
-#: Package directories allowed to call `Store.write_trusted`.
-_TRUSTED_WRITERS = ("review",)
+#: The modules allowed to call `Store.write_trusted`, as `cairn/`-relative
+#: paths. Each must enforce `[review] require_human_approval` first (see
+#: `cairn.core.config.enforce_human_approval`); adding a module here means
+#: giving it that gate.
+_TRUSTED_WRITERS = ("review/cli_review.py",)
 
 
 def _make_entry(status: EntryStatus) -> Entry:
@@ -106,9 +109,15 @@ def _callers_of(method: str) -> set[str]:
 def test_only_the_review_flow_calls_write_trusted() -> None:
     callers = _callers_of("write_trusted")
 
-    assert callers, "expected the review flow to call write_trusted"
-    outside_review = {caller for caller in callers if caller.split("/")[0] not in _TRUSTED_WRITERS}
-    assert outside_review == set(), (
-        f"{sorted(outside_review)} call Store.write_trusted, but only modules under "
-        f"{_TRUSTED_WRITERS} may write to entries/"
+    assert callers == set(_TRUSTED_WRITERS), (
+        f"write_trusted callers are {sorted(callers)}, expected exactly {list(_TRUSTED_WRITERS)}; "
+        "only the review flow may write to entries/"
     )
+
+
+def test_every_write_trusted_caller_enforces_the_human_approval_gate() -> None:
+    for relative in _callers_of("write_trusted"):
+        source = (_CAIRN_PACKAGE / relative).read_text(encoding="utf-8")
+        assert "enforce_human_approval" in source, (
+            f"cairn/{relative} writes to entries/ without enforcing [review] require_human_approval"
+        )
