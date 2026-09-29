@@ -34,13 +34,22 @@ def test_candidate_entry_schema_covers_only_model_produced_fields() -> None:
     schema = candidate_entry_json_schema()
 
     assert schema["$id"] == CANDIDATE_ENTRY_SCHEMA_ID
+    # `artifacts` is a selection from a closed list Cairn puts in the prompt,
+    # not free text: the provider rejects any path that was not offered. Every
+    # other evidence field -- commit, excerpt_sha256, session_id, captured_at --
+    # is absent here on purpose, because a model that can write its own
+    # provenance can invent it.
     assert set(schema["properties"]) == {
         "id",
         "type",
         "title",
+        "artifacts",
         "scope",
         "tags",
         "confidence",
         "body",
     }
+    assert "evidence" not in schema["properties"]
+    assert "commit" not in schema["properties"]
+    assert "excerpt_sha256" not in schema["properties"]
     assert schema["additionalProperties"] is False

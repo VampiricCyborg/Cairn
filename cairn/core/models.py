@@ -124,11 +124,16 @@ class Entry(BaseModel):
 class CandidateEntry(BaseModel):
     """The part of an `Entry` a model is asked to produce, plus its Markdown body.
 
-    Everything else (`status`, `spec_version`, `evidence`, `created`,
-    `updated`, `supersedes`, `review`, `usage`) is filled in
-    deterministically by the provider, the same division of responsibility
-    `MockProvider` uses. The provider also replaces `id` with a generated
-    `"{type}-{6 hex chars}"` id, so a model can't collide with existing entries.
+    The model supplies `title`, `body`, `type`, `tags` and `confidence`, and
+    selects `artifacts` from a list Cairn puts in the prompt. Everything else
+    (`status`, `spec_version`, `evidence` -- including `commit` and
+    `excerpt_sha256` -- `created`, `updated`, `supersedes`, `review`, `usage`)
+    is filled in deterministically by the provider, and `scope` is derived
+    from the selected artifacts. Evidence a model can write is evidence a
+    model can invent, which is the opposite of what an audit trail is for.
+
+    The provider also replaces `id` with a generated `"{type}-{6 hex chars}"`
+    id, so a model cannot collide with an existing entry.
     """
 
     model_config = ConfigDict(extra="forbid", title="Cairn candidate entry")
@@ -136,9 +141,21 @@ class CandidateEntry(BaseModel):
     id: str = Field(description="A short kebab-case slug for the lesson.")
     type: EntryType
     title: str = Field(description="One-line summary of the lesson.")
+    artifacts: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The files this lesson is grounded in. MUST be chosen from the files "
+            "listed in the prompt; a path that was not in that list is rejected, "
+            "and the candidate with it."
+        ),
+    )
     scope: list[str] = Field(
         default_factory=list,
-        description='Glob patterns for the paths the lesson applies to, e.g. ["tests/**"].',
+        description=(
+            'Glob patterns for the paths the lesson applies to, e.g. ["tests/**"]. '
+            "Derived from `artifacts` by Cairn; anything here that does not match a "
+            "selected artifact is discarded."
+        ),
     )
     tags: list[str] = Field(
         default_factory=list, description='Short free-form labels, e.g. ["testing", "database"].'
@@ -199,6 +216,14 @@ class SessionTrace(BaseModel):
     errors: list[str] = Field(default_factory=list)
     diffs: list[Diff] = Field(default_factory=list)
     outcome: str
+    commit: str | None = Field(
+        default=None,
+        description=(
+            "Git HEAD at capture time, recorded by the capture hook rather than "
+            "inferred later: by the time a trace is reflected on, the working tree "
+            "has usually moved on."
+        ),
+    )
 
 
 def entry_json_schema() -> dict[str, Any]:

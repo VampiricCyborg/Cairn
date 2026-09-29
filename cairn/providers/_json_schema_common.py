@@ -105,14 +105,50 @@ def parse_candidates(text: str, *, provider: str) -> list[object]:
     return []
 
 
+def touched_files(trace: SessionTrace) -> list[str]:
+    """Every file the normalizer saw change, in trace order, deduplicated.
+
+    The authoritative list of what a lesson from this session may cite. It is
+    put in the prompt for the model to select from, and used to reject any
+    path the model returns that is not in it.
+    """
+
+    return list(dict.fromkeys(diff.file for diff in trace.diffs))
+
+
+def derive_scope(artifacts: list[str]) -> list[str]:
+    """Glob patterns covering `artifacts`, one per containing directory.
+
+    Derived rather than model-supplied: scope decides which future sessions
+    see the entry, so an invented glob silently mis-targets injection. The
+    immediate parent directory is the sensible middle -- the first path
+    segment is usually too broad to mean anything, the file itself too narrow
+    to match the next file with the same problem.
+    """
+
+    patterns: list[str] = []
+    for artifact in artifacts:
+        normalized = artifact.replace("\\", "/").lstrip("./")
+        parent, _, _ = normalized.rpartition("/")
+        patterns.append(f"{parent}/**" if parent else normalized)
+    return sorted(dict.fromkeys(patterns))
+
+
 def build_evidence(trace: SessionTrace, excerpt: str) -> Evidence:
-    """`Evidence` for a candidate extracted from `trace`'s salient `excerpt`."""
+    """The deterministic `Evidence` shared by every candidate from `trace`.
+
+    `artifacts` is filled per candidate in `_to_entry` from the subset the
+    model selected; everything here is Cairn's alone. `excerpt_sha256` hashes
+    the excerpt actually sent to the model, so the provenance points at what
+    was really seen rather than at what a model claimed to have seen.
+    """
 
     return Evidence(
         harness=trace.harness,
         session_id=trace.session_id,
         captured_at=trace.ended_at,
-        artifacts=[diff.file for diff in trace.diffs],
+        commit=trace.commit,
+        artifacts=touched_files(trace),
         excerpt_sha256=hashlib.sha256(excerpt.encode("utf-8")).hexdigest(),
     )
 
@@ -124,16 +160,45 @@ def _to_entry(raw: object, trace: SessionTrace, evidence: Evidence) -> tuple[Ent
 
     try:
         candidate = CandidateEntry.model_validate(raw)
+    except ValidationError as exc:
+        problems = "; ".join(
+            f"{'.'.join(str(part) for part in error['loc']) or '<root>'}: {error['msg']}"
+            for error in exc.errors()
+        )
+        logger.warning("dropping invalid candidate (%s)", problems)
+        return None
+
+    # The artifact gate. A model may only select from the files the normalizer
+    # saw change; anything else is invented provenance, and an entry whose
+    # evidence is invented is worse than no entry, because it looks auditable.
+    available = touched_files(trace)
+    invented = [path for path in candidate.artifacts if path not in available]
+    if invented:
+        logger.warning(
+            "dropping candidate %r: artifacts not in the session's touched files: %s",
+            candidate.title,
+            ", ".join(invented),
+        )
+        return None
+
+    artifacts = candidate.artifacts or available
+    # Model scope may refine, never invent: a pattern that covers none of the
+    # selected artifacts is discarded, and an empty result falls back to derived.
+    derived = derive_scope(artifacts)
+    refined = [pattern for pattern in candidate.scope if pattern in derived]
+    scope = refined or derived
+
+    try:
         entry = Entry(
             id=make_entry_id(candidate.type, f"{trace.session_id}:{candidate.title}"),
             type=candidate.type,
             title=candidate.title,
             status=EntryStatus.STAGED,
             spec_version=_SPEC_VERSION,
-            scope=candidate.scope,
+            scope=scope,
             tags=candidate.tags,
             confidence=candidate.confidence,
-            evidence=evidence.model_copy(deep=True),
+            evidence=evidence.model_copy(deep=True, update={"artifacts": artifacts}),
             created=trace.ended_at,
             updated=trace.ended_at,
         )

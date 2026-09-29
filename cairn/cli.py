@@ -430,6 +430,12 @@ def _sweep_queue(store: Store, provider: Provider) -> int:
             job = json.loads(job_path.read_text(encoding="utf-8"))
             transcript_path = Path(str(job["transcript_path"]))
             trace = normalize(transcript_path, harness=str(job.get("harness", "claude-code")))
+            # The capture hook recorded HEAD at session end; the working tree
+            # has very likely moved since, so the job record is the only place
+            # the right commit still exists.
+            commit = job.get("commit")
+            if isinstance(commit, str) and commit:
+                trace = trace.model_copy(update={"commit": commit})
             for entry, result in _extract_and_stage(
                 store, provider, trace, _QUEUE_SWEEP_MAX_CANDIDATES
             ):
@@ -689,11 +695,46 @@ def _claude_project_slug(repo_root: Path) -> str:
     return re.sub(r"[:/\\]", "-", str(repo_root))
 
 
+class TranscriptsNotFoundError(Exception):
+    """Raised when Claude Code's transcript directory cannot be located.
+
+    Its own failure mode rather than an empty list, because the capture rate is
+    a ratio whose denominator lives there: with no transcripts it would read
+    "0 sessions, 100% capture", which is indistinguishable from a healthy store
+    and is exactly the "reports zero when it means I cannot see" failure this
+    diagnostic exists to catch.
+    """
+
+
 def _session_transcripts(repo_root: Path) -> list[Path]:
+    """Every session transcript Claude Code wrote for `repo_root`.
+
+    The directory name is a slug of the project path -- Claude Code's own
+    convention, not a documented interface -- so if it ever changes this raises
+    rather than quietly returning nothing.
+    """
+
+    if not _CLAUDE_PROJECTS_DIR.is_dir():
+        raise TranscriptsNotFoundError(
+            f"{_CLAUDE_PROJECTS_DIR} does not exist, so no session transcripts can be "
+            "counted and the capture rate has no denominator"
+        )
     directory = _CLAUDE_PROJECTS_DIR / _claude_project_slug(repo_root)
     if not directory.is_dir():
-        return []
-    return sorted(directory.glob("*.jsonl"))
+        near = sorted(path.name for path in _CLAUDE_PROJECTS_DIR.iterdir() if path.is_dir())[:5]
+        raise TranscriptsNotFoundError(
+            f"expected this project's transcripts at {directory}, which does not exist. "
+            "Claude Code derives that directory name from the project path and the "
+            "convention may have changed"
+            + (f"; that directory holds e.g. {', '.join(near)}" if near else "")
+        )
+    transcripts = sorted(directory.glob("*.jsonl"))
+    if not transcripts:
+        raise TranscriptsNotFoundError(
+            f"{directory} exists but holds no *.jsonl transcripts, so the capture rate "
+            "has no denominator"
+        )
+    return transcripts
 
 
 def _read_capture_log(cairn_root: Path) -> list[dict[str, Any]]:
@@ -819,7 +860,12 @@ def stats(
     if capture:
         typer.echo(f"capture log  {cairn_root / 'capture-log.jsonl'}")
         typer.echo("")
-        for line in _render_capture_stats(repo_root, cairn_root):
+        try:
+            capture_lines = _render_capture_stats(repo_root, cairn_root)
+        except TranscriptsNotFoundError as exc:
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        for line in capture_lines:
             typer.echo(line)
         if not review:
             return

@@ -1,25 +1,24 @@
 """Anthropic provider implementation."""
 
-import hashlib
 import logging
 from typing import Any
 
 import anthropic
 from anthropic.types import Message, ToolParam, ToolUseBlock
-from pydantic import ValidationError
 
 from cairn.core.models import (
-    CandidateEntry,
     Entry,
-    EntryStatus,
-    Evidence,
     SessionTrace,
     candidate_entry_json_schema,
 )
 from cairn.core.redactor import Redactor
 from cairn.core.reflector import build_reflector_prompt
 from cairn.core.salience import find_salient_spans, is_reflectable, render_salient_excerpt
-from cairn.providers.base import make_entry_id
+from cairn.providers._json_schema_common import (
+    build_evidence,
+    raw_candidates_to_entries,
+    touched_files,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -91,37 +90,6 @@ def _raw_candidates(response: Message) -> list[object]:
     return []
 
 
-def _to_entry(raw: object, trace: SessionTrace, evidence: Evidence) -> tuple[Entry, str] | None:
-    """Validate one raw candidate and complete it into a staged `Entry` plus
-    body. Returns `None`, logging a warning, if it fails validation as either
-    a `CandidateEntry` or the completed `Entry`."""
-
-    try:
-        candidate = CandidateEntry.model_validate(raw)
-        entry = Entry(
-            id=make_entry_id(candidate.type, f"{trace.session_id}:{candidate.title}"),
-            type=candidate.type,
-            title=candidate.title,
-            status=EntryStatus.STAGED,
-            spec_version=_SPEC_VERSION,
-            scope=candidate.scope,
-            tags=candidate.tags,
-            confidence=candidate.confidence,
-            evidence=evidence.model_copy(deep=True),
-            created=trace.ended_at,
-            updated=trace.ended_at,
-        )
-    except ValidationError as exc:
-        problems = "; ".join(
-            f"{'.'.join(str(part) for part in error['loc']) or '<root>'}: {error['msg']}"
-            for error in exc.errors()
-        )
-        logger.warning("dropping invalid candidate (%s)", problems)
-        return None
-
-    return entry, candidate.body
-
-
 class AnthropicProvider:
     """Extracts candidate entries with a Claude model through the Anthropic API.
 
@@ -174,34 +142,18 @@ class AnthropicProvider:
             max_tokens=self.max_output_tokens,
             tools=[_tool(max_candidates)],
             tool_choice={"type": "tool", "name": TOOL_NAME},
-            messages=[{"role": "user", "content": build_reflector_prompt(excerpt, known)}],
+            messages=[
+                {
+                    "role": "user",
+                    "content": build_reflector_prompt(excerpt, known, touched_files(redacted)),
+                }
+            ],
         )
 
-        raw_candidates = _raw_candidates(response)
-        if len(raw_candidates) > max_candidates:
-            logger.info(
-                "model returned %d candidates; keeping at most %d",
-                len(raw_candidates),
-                max_candidates,
-            )
-
-        evidence = Evidence(
-            harness=redacted.harness,
-            session_id=redacted.session_id,
-            captured_at=redacted.ended_at,
-            artifacts=[diff.file for diff in redacted.diffs],
-            excerpt_sha256=hashlib.sha256(excerpt.encode("utf-8")).hexdigest(),
+        # Shared with the OpenAI and Ollama providers on purpose: evidence
+        # completion and the artifact gate must not have a per-provider copy
+        # that can drift out of step with the others.
+        evidence = build_evidence(redacted, excerpt)
+        return raw_candidates_to_entries(
+            _raw_candidates(response), redacted, evidence, max_candidates
         )
-
-        candidates: list[tuple[Entry, str]] = []
-        seen_ids: set[str] = set()
-        for raw in raw_candidates:
-            if len(candidates) >= max_candidates:
-                break
-            converted = _to_entry(raw, redacted, evidence)
-            if converted is None or converted[0].id in seen_ids:
-                continue
-            seen_ids.add(converted[0].id)
-            candidates.append(converted)
-
-        return candidates

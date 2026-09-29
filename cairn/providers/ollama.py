@@ -14,6 +14,7 @@ from cairn.providers._json_schema_common import (
     candidates_json_schema,
     parse_candidates,
     raw_candidates_to_entries,
+    touched_files,
 )
 from cairn.providers.base import ProviderUnavailableError
 
@@ -73,7 +74,7 @@ class OllamaProvider:
             return []
 
         excerpt = render_salient_excerpt(redacted, find_salient_spans(redacted))
-        prompt = build_reflector_prompt(excerpt, known)
+        prompt = build_reflector_prompt(excerpt, known, touched_files(redacted))
 
         try:
             response = self.client.post(

@@ -127,6 +127,48 @@ def _log_capture(
     )
 
 
+def _git_head(cwd: str) -> str | None:
+    """The commit `cwd` is on, read straight out of `.git`.
+
+    Read rather than shelled out to: `git rev-parse HEAD` would cost a process
+    spawn inside a hook whose whole budget is one small file write, and git is
+    not otherwise a runtime dependency of this script. Handles the three cases
+    that occur in practice -- a symbolic HEAD with a loose ref, a symbolic HEAD
+    whose ref lives in packed-refs, and a detached HEAD -- and gives up quietly
+    on anything else, because a missing commit is a weaker entry, not a failed
+    capture.
+    """
+
+    try:
+        head_path = os.path.join(cwd, ".git", "HEAD")
+        with open(head_path, encoding="utf-8") as handle:
+            head = handle.read().strip()
+    except OSError:
+        return None
+
+    if not head.startswith("ref:"):
+        return head or None
+
+    ref = head[4:].strip()
+    try:
+        with open(os.path.join(cwd, ".git", ref), encoding="utf-8") as handle:
+            return handle.read().strip() or None
+    except OSError:
+        pass
+
+    try:
+        with open(os.path.join(cwd, ".git", "packed-refs"), encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("#"):
+                    continue
+                parts = line.split()
+                if len(parts) == 2 and parts[1] == ref:
+                    return parts[0]
+    except OSError:
+        pass
+    return None
+
+
 def enqueue(payload: dict, *, now: str | None = None) -> str | None:
     """Write the queue record for `payload`. Returns the path written, or None.
 
@@ -166,6 +208,10 @@ def enqueue(payload: dict, *, now: str | None = None) -> str | None:
         # Free provenance: why the session ended. Carried so the sweep, and any
         # later analysis, can tell a normal exit from a /clear or a crash.
         "reason": reason,
+        # Captured now, not at reflect time: by the time this job is swept the
+        # working tree has usually moved on, and an entry that cites the wrong
+        # commit is worse than one that cites none.
+        "commit": _git_head(cwd),
     }
 
     target = os.path.join(queue_dir, f"{session_id}.json")

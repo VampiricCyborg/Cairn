@@ -154,6 +154,19 @@
     "outcome": {
       "title": "Outcome",
       "type": "string"
+    },
+    "commit": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Git HEAD at capture time, recorded by the capture hook rather than inferred later: by the time a trace is reflected on, the working tree has usually moved on.",
+      "title": "Commit"
     }
   },
   "required": [

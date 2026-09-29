@@ -10,7 +10,8 @@ from cairn.core.models import Entry
 
 #: The reflector prompt, kept apart from the code that fills it in so the
 #: wording can be iterated on without touching code structure. Placeholders:
-#: `{excerpt}` and `{known_entries}`; any other literal brace must be doubled.
+#: `{excerpt}`, `{known_entries}` and `{touched_files}`; any other literal
+#: brace must be doubled.
 #: The quality criteria table is copied verbatim from SPEC.md, and
 #: `tests/test_reflector.py` fails if the two drift apart.
 REFLECTOR_PROMPT_TEMPLATE = """\
@@ -35,6 +36,14 @@ covers, even in different words:
 <known_entries>
 {known_entries}
 </known_entries>
+
+These are the files this session changed. `artifacts` must be chosen from this list and
+nothing else: a candidate citing any other path is discarded, along with the lesson. If the
+lesson is not tied to a particular file, leave `artifacts` empty.
+
+<touched_files>
+{touched_files}
+</touched_files>
 
 ## Entry types
 
@@ -63,8 +72,10 @@ A candidate must meet every one of these criteria. If it fails any of them, leav
   or generalize a lesson to have something to return, and never pad the list toward the maximum.
 - Each candidate makes one claim. Split a compound lesson, or keep only its strongest part.
 - `title` is a single line a reviewer can judge at a glance.
-- `scope` lists glob patterns for the paths the lesson applies to, taken from files in the
-  excerpt. Leave it empty if the lesson is not tied to particular paths.
+- `artifacts` selects from <touched_files> above. Do not write a path that is not listed
+  there, and do not invent one from the excerpt text.
+- `scope` is derived by Cairn from the artifacts you select, so you may leave it empty. A
+  pattern that does not follow from those artifacts is dropped.
 - `body` is Markdown that points at the evidence in the excerpt: the file, error message, or
   command involved. For a gotcha, use "## What happens" and "## What to do" sections.
 - `confidence` is high only when the excerpt shows the lesson confirmed (for example, a failing
@@ -84,11 +95,26 @@ def _render_known_entries(known: list[Entry]) -> str:
     return "\n".join(f"- {entry.id} [{entry.type.value}] {entry.title}" for entry in known)
 
 
-def build_reflector_prompt(excerpt: str, known: list[Entry]) -> str:
+def _render_touched_files(touched: list[str]) -> str:
+    if not touched:
+        return "(this session changed no files)"
+    return "\n".join(f"- {path}" for path in touched)
+
+
+def build_reflector_prompt(excerpt: str, known: list[Entry], touched: list[str]) -> str:
     """The full reflector prompt for one salient `excerpt` (as rendered by
     `render_salient_excerpt`), with `known` approved entries listed so the
-    model does not re-propose them."""
+    model does not re-propose them, and `touched` -- the normalizer's
+    changed-file set -- as the closed list `artifacts` may be drawn from.
+
+    Passing the list in is what lets the artifact gate be strict without being
+    arbitrary: the model is told exactly which paths are citable, so a
+    rejected candidate is a model ignoring an explicit constraint rather than
+    one guessing in the dark.
+    """
 
     return REFLECTOR_PROMPT_TEMPLATE.format(
-        excerpt=excerpt, known_entries=_render_known_entries(known)
+        excerpt=excerpt,
+        known_entries=_render_known_entries(known),
+        touched_files=_render_touched_files(touched),
     )

@@ -161,8 +161,25 @@ def test_a_run_that_fails_to_write_stops_after_the_second_checkpoint(tmp_path: P
 # -- cairn stats --capture --------------------------------------------------------
 
 
+def _fake_transcripts(tmp_path: Path, *session_ids: str) -> None:
+    """Stand in for Claude Code's transcript directory, which is the
+    denominator for the capture rate."""
+
+    import pytest as _pytest
+
+    from cairn import cli
+
+    projects = tmp_path / "projects"
+    directory = projects / cli._claude_project_slug(tmp_path.resolve())
+    directory.mkdir(parents=True, exist_ok=True)
+    for session_id in session_ids or ("sess-1",):
+        (directory / f"{session_id}.jsonl").write_text("{}", encoding="utf-8")
+    _pytest.MonkeyPatch().setattr(cli, "_CLAUDE_PROJECTS_DIR", projects)
+
+
 def test_stats_capture_runs_without_a_log(tmp_path: Path) -> None:
     assert runner.invoke(app, ["init", str(tmp_path)]).exit_code == 0
+    _fake_transcripts(tmp_path)
 
     result = runner.invoke(app, ["stats", str(tmp_path), "--capture"])
 
@@ -172,9 +189,51 @@ def test_stats_capture_runs_without_a_log(tmp_path: Path) -> None:
 
 def test_stats_accepts_review_and_capture_together(tmp_path: Path) -> None:
     assert runner.invoke(app, ["init", str(tmp_path)]).exit_code == 0
+    _fake_transcripts(tmp_path)
 
     result = runner.invoke(app, ["stats", str(tmp_path), "--capture", "--review"])
 
     assert result.exit_code == 0, result.output
     assert "capture rate" in result.output
     assert "no review decisions logged yet" in result.output
+
+
+# -- the diagnostic must not report zero when it means "I cannot see" -------------
+
+
+def test_unresolvable_transcript_directory_fails_loudly(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    """Claude Code's transcript directory is found by slugifying the project
+    path, which is its convention and not a documented interface. If that stops
+    resolving, the capture rate must error rather than read 0 sessions and
+    100% capture -- a number indistinguishable from a healthy store."""
+
+    import pytest as _pytest
+
+    from cairn import cli
+
+    assert runner.invoke(app, ["init", str(tmp_path)]).exit_code == 0
+    _pytest.MonkeyPatch().setattr(cli, "_CLAUDE_PROJECTS_DIR", tmp_path / "no-such-projects")
+
+    result = runner.invoke(app, ["stats", str(tmp_path), "--capture"])
+
+    assert result.exit_code == 1
+    assert "does not exist" in result.output
+    assert "0 sessions" not in result.output
+
+
+def test_a_project_with_no_transcripts_fails_loudly(tmp_path: Path, monkeypatch: "object") -> None:
+    import pytest as _pytest
+
+    from cairn import cli
+
+    assert runner.invoke(app, ["init", str(tmp_path)]).exit_code == 0
+    projects = tmp_path / "projects"
+    (projects / cli._claude_project_slug(tmp_path.resolve())).mkdir(parents=True)
+    _pytest.MonkeyPatch().setattr(cli, "_CLAUDE_PROJECTS_DIR", projects)
+
+    result = runner.invoke(app, ["stats", str(tmp_path), "--capture"])
+
+    assert result.exit_code == 1
+    assert "no denominator" in result.output

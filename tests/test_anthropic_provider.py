@@ -149,7 +149,12 @@ def test_two_candidates_convert_to_staged_entries() -> None:
     assert re.fullmatch(r"gotcha-[0-9a-f]{6}", gotcha.id)
     assert gotcha.type is EntryType.GOTCHA
     assert gotcha.title == "Run alembic upgrade head before the migration tests"
-    assert gotcha.scope == ["alembic/**", "tests/**"]
+    # Scope is derived from the touched files, not taken from the model. The
+    # response asked for ["alembic/**", "tests/**"], but this session touched
+    # only alembic/versions/0042_last_seen.py -- the .env.local diff is
+    # deny-globbed away -- so "tests/**" is an invented glob and is dropped
+    # rather than silently widening where this entry gets injected.
+    assert gotcha.scope == ["alembic/versions/**"]
     assert gotcha.tags == ["database"]
     assert gotcha.confidence is Confidence.HIGH
     assert "Run `alembic upgrade head`." in gotcha_body
