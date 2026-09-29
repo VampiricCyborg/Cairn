@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import tomllib
+from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ import typer
 from pydantic import ValidationError
 
 from cairn import __version__
+from cairn.core import review_log
 from cairn.core.config import (
     HumanApprovalRequiredError,
     human_approval_problem,
@@ -28,6 +30,13 @@ from cairn.core.curator import CurationResult, Curator
 from cairn.core.eval import DEFAULT_JUDGE_MODEL, evaluate_fixture, summarize
 from cairn.core.models import Entry, EntryStatus, EntryType, SessionTrace
 from cairn.core.normalizer import normalize
+from cairn.core.review_log import (
+    APPROVING_ACTIONS,
+    EXTRACTION_ACTIONS,
+    HUMAN_ACTIONS,
+    ReviewAction,
+    ReviewLogRecord,
+)
 from cairn.core.store import Store, StoreNotFoundError, load_entry
 from cairn.providers.anthropic import AnthropicProvider
 from cairn.providers.base import Provider, ProviderUnavailableError
@@ -93,7 +102,7 @@ patterns   = ["sk-[A-Za-z0-9]{{20,}}", "ghp_[A-Za-z0-9]{{36}}", "AKIA[0-9A-Z]{{1
 require_human_approval = true        # v0 refuses to run without this
 """
 
-_GITIGNORE_LINES = [".cairn/queue/", ".cairn/traces/"]
+_GITIGNORE_LINES = [".cairn/queue/", ".cairn/traces/", ".cairn/review-log.jsonl"]
 
 
 @app.callback(invoke_without_command=True)
@@ -302,6 +311,24 @@ def _resolve_provider(cairn_root: Path) -> Provider:
     return get_provider(_load_config_toml(cairn_root))
 
 
+#: `CurationResult.outcome` -> the `reason` recorded on a `gate_drop`. Mapped
+#: explicitly rather than reusing the outcome string, so a new dropping gate
+#: has to name itself here and cannot land in the log as `dropped_<something>`.
+_GATE_DROP_REASONS = {"dropped_tombstoned": "tombstone"}
+
+
+def _provider_model(provider: Provider) -> str | None:
+    """The model string `provider` is configured with, if it exposes one.
+
+    `Provider` is a structural protocol with `extract` and nothing else, and
+    `MockProvider` has no model at all, so this is a best-effort read for the
+    review log rather than part of the interface.
+    """
+
+    model = getattr(provider, "model", None)
+    return model if isinstance(model, str) and model else None
+
+
 def _extract_and_stage(
     store: Store, provider: Provider, trace: SessionTrace, max_candidates: int
 ) -> list[tuple[Entry, CurationResult]]:
@@ -312,11 +339,33 @@ def _extract_and_stage(
     `cairn reflect` and the SessionStart queue sweep so both run the same
     tombstone, near-duplicate and contradiction gates. Nothing here (or in
     the Curator) can write to `entries/`; only `cairn review` does.
+
+    Every candidate is also recorded in the review log as `staged` or
+    `gate_drop` — the extraction-side population, kept apart from the human
+    decisions `cairn review` writes (see `cairn.core.review_log`). This is
+    what makes the gate-drop rate computable at all: without a `staged`
+    record there is no denominator for the candidates the gates killed.
     """
 
     candidates = provider.extract(trace, known=store.approved(), max_candidates=max_candidates)
     curator = Curator(store)
-    return [(entry, curator.stage_candidate(entry, body)) for entry, body in candidates]
+    model = _provider_model(provider)
+
+    results: list[tuple[Entry, CurationResult]] = []
+    for entry, body in candidates:
+        result = curator.stage_candidate(entry, body)
+        dropped = result.written_path is None
+        review_log.append(
+            store.root,
+            review_log.make_record(
+                entry,
+                ReviewAction.GATE_DROP if dropped else ReviewAction.STAGED,
+                reason=_GATE_DROP_REASONS.get(result.outcome, result.outcome) if dropped else None,
+                model=model,
+            ),
+        )
+        results.append((entry, result))
+    return results
 
 
 _QUEUE_SWEEP_MAX_CANDIDATES = 3
@@ -511,6 +560,116 @@ def review(
     except ValidationError as exc:
         typer.echo(f"error: a staged entry is invalid; run `cairn validate`: {exc}", err=True)
         raise typer.Exit(code=1) from exc
+
+
+def _rate(numerator: int, denominator: int, noun: str) -> str:
+    if denominator == 0:
+        return f"n/a (0/0 {noun})"
+    return f"{numerator / denominator:.1%} ({numerator}/{denominator} {noun})"
+
+
+def _histogram(counts: Counter[str], indent: str = "  ") -> list[str]:
+    """Counts, highest first, ties broken alphabetically so output is stable."""
+
+    return [
+        f"{indent}{count:>4}  {label}"
+        for label, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+
+def _render_review_stats(records: list[ReviewLogRecord]) -> list[str]:
+    """`cairn stats --review` output.
+
+    The two populations in the log are reported as separate blocks with
+    separate denominators, and never summed: approval rate is about the
+    reviewer's judgement of what they were shown, gate-drop rate is about the
+    Curator's, and a single blended number would let a well-tuned Curator
+    read as a reviewer rejecting things. See `cairn.core.review_log`.
+    """
+
+    by_action = Counter(record.action for record in records)
+    human = [record for record in records if record.action in HUMAN_ACTIONS]
+    extraction = [record for record in records if record.action in EXTRACTION_ACTIONS]
+
+    shown = len(human)
+    approvals = sum(by_action[action] for action in APPROVING_ACTIONS)
+    decided = shown - by_action[ReviewAction.SKIP]
+
+    lines = [
+        f"shown to a human       {shown:>5}",
+        f"  approved             {by_action[ReviewAction.APPROVE]:>5}",
+        f"  approved with edit   {by_action[ReviewAction.APPROVE_WITH_EDIT]:>5}",
+        f"  merged               {by_action[ReviewAction.MERGE]:>5}",
+        f"  rejected             {by_action[ReviewAction.REJECT]:>5}",
+        f"  skipped              {by_action[ReviewAction.SKIP]:>5}",
+        f"approval rate          {_rate(approvals, shown, 'shown')}",
+        f"  excluding skipped    {_rate(approvals, decided, 'decided')}",
+    ]
+
+    rejections = Counter(
+        record.reason or "(no reason recorded)"
+        for record in human
+        if record.action is ReviewAction.REJECT
+    )
+    if rejections:
+        lines += ["", "rejection reasons", *_histogram(rejections)]
+
+    drops_total = by_action[ReviewAction.GATE_DROP]
+    lines += [
+        "",
+        "gates — a separate population, never folded into approval rate",
+        f"extracted              {len(extraction):>5}",
+        f"  staged for review    {by_action[ReviewAction.STAGED]:>5}",
+        f"  dropped by a gate    {by_action[ReviewAction.GATE_DROP]:>5}",
+        f"gate-drop rate         {_rate(drops_total, len(extraction), 'extracted')}",
+    ]
+
+    drops = Counter(
+        record.reason or "(no gate recorded)"
+        for record in extraction
+        if record.action is ReviewAction.GATE_DROP
+    )
+    if drops:
+        lines += _histogram(drops)
+
+    return lines
+
+
+@app.command()
+def stats(
+    path: Path = typer.Argument(Path("."), help="Repository root containing `.cairn/`."),
+    review: bool = typer.Option(
+        False, "--review", help="Summarize `.cairn/review-log.jsonl`: approval rate and gate drops."
+    ),
+) -> None:
+    """Summarize the review log. Only `--review` is implemented so far."""
+
+    if not review:
+        typer.echo(
+            "error: `cairn stats` currently implements only `--review`; "
+            "store, context and health stats are not built yet",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    cairn_root = path.resolve() / ".cairn"
+    try:
+        Store(cairn_root)
+    except StoreNotFoundError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    records = review_log.read(cairn_root)
+    log_file = review_log.log_path(cairn_root)
+    if not records:
+        typer.echo(f"no review decisions logged yet ({log_file} is empty or absent)")
+        typer.echo("`cairn reflect` records what the gates did; `cairn review` records your calls")
+        return
+
+    typer.echo(f"review log  {log_file}  ·  {len(records)} records")
+    typer.echo("")
+    for line in _render_review_stats(records):
+        typer.echo(line)
 
 
 _EVAL_MAX_CANDIDATES = 3

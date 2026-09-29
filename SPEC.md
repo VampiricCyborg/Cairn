@@ -42,6 +42,7 @@ lifecycle semantics bumps `spec_version` and gets a migration note here.
 ├── rejected/                # tombstones: id + reason, prevents re-proposal
 ├── queue/                   # pending capture jobs        (gitignored)
 ├── traces/                  # normalized session traces   (gitignored, TTL)
+├── review-log.jsonl         # append-only decision log    (gitignored)
 └── schema/
     ├── entry.schema.json
     └── trace.schema.json
@@ -57,11 +58,13 @@ lifecycle semantics bumps `spec_version` and gets a migration note here.
 | `rejected/` | yes | Tombstones: `rejected/<id>.json`, holding only `id`, `title`, `reason`, and `excerpt_sha256` — not a full `Entry`. Suppresses re-proposal of the same candidate. |
 | `queue/` | **no** | Pending capture jobs — one small JSON record per session, written by the capture hook and drained by the reflect worker. Ephemeral by design. |
 | `traces/` | **no** | Normalized `SessionTrace` documents, TTL'd. The store keeps only a hash of the source excerpt for provenance, not the excerpt itself. |
+| `review-log.jsonl` | **no** | One JSON object per line: what happened to each candidate, either a human decision from `cairn review` or an extraction-side event from `cairn reflect`. Local telemetry about review habits, not curated knowledge, so it is deliberately outside this spec and carries no `spec_version` — nothing may depend on its shape. Read by `cairn stats --review`; see `cairn.core.review_log`. |
 | `schema/` | yes | The JSON Schemas this spec normatively refers to. |
 
 The split is deliberate: everything a reviewer needs to audit the store's
 *knowledge* is committed and diffable; everything that is raw session
-exhaust (`queue/`, `traces/`) is local and disposable.
+exhaust (`queue/`, `traces/`) or a record of this machine's own review
+habits (`review-log.jsonl`) is local and disposable.
 
 ---
 

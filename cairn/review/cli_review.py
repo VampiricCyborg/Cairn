@@ -48,8 +48,10 @@ from rich.console import Console, Group
 from rich.panel import Panel
 from rich.text import Text
 
+from cairn.core import review_log
 from cairn.core.config import enforce_human_approval
 from cairn.core.models import Entry, EntryStatus, Review
+from cairn.core.review_log import ReviewAction
 from cairn.core.store import Store
 
 _ACTIONS = {
@@ -117,6 +119,21 @@ def _render_markdown(entry: Entry, body: str) -> str:
 
     post = frontmatter.Post(body, **entry.model_dump(mode="json"))
     return frontmatter.dumps(post) + "\n"
+
+
+def _edited_fields(
+    original: Entry, edited: Entry, original_body: str, edited_body: str
+) -> list[str]:
+    """Which frontmatter fields the human changed, plus `body` if they rewrote
+    the prose. Compared before approval, so the status and `review` fields
+    `_approve` sets itself are never counted as the reviewer's edits."""
+
+    before = original.model_dump(mode="json")
+    after = edited.model_dump(mode="json")
+    fields = sorted(key for key in after if before.get(key) != after.get(key))
+    if original_body.strip() != edited_body.strip():
+        fields.append("body")
+    return fields
 
 
 def _parse_markdown(text: str) -> tuple[Entry, str]:
@@ -270,11 +287,45 @@ class ReviewSession:
         candidate.path.unlink()
         return True
 
-    def _approve(self, candidate: _Candidate, entry: Entry, body: str) -> None:
+    def _log(
+        self,
+        entry: Entry,
+        action: ReviewAction,
+        *,
+        reason: str | None = None,
+        edited_fields: list[str] | None = None,
+    ) -> None:
+        """Record one human decision. Called after the decision is applied to
+        the store, so a log write that fails costs the record, never the
+        decision (`review_log.append` warns instead of raising)."""
+
+        review_log.append(
+            self.store.root,
+            review_log.make_record(
+                entry,
+                action,
+                reason=reason,
+                edited_fields=edited_fields,
+                now=self.now(),
+            ),
+        )
+
+    def _approve(
+        self,
+        candidate: _Candidate,
+        entry: Entry,
+        body: str,
+        *,
+        edited_fields: list[str] | None = None,
+    ) -> None:
+        action = (
+            ReviewAction.APPROVE_WITH_EDIT if edited_fields is not None else ReviewAction.APPROVE
+        )
         if entry.proposed_amendment_of:
             if self._apply_amendment(candidate, entry.proposed_amendment_of):
                 self.summary.approved += 1
                 typer.echo(f"amended {entry.proposed_amendment_of} with evidence from {entry.id}")
+                self._log(entry, action, edited_fields=edited_fields)
                 return
             typer.echo(
                 f"{entry.proposed_amendment_of!r} is no longer an approved entry; "
@@ -295,6 +346,7 @@ class ReviewSession:
         candidate.path.unlink()
         self.summary.approved += 1
         typer.echo(f"approved {approved.id} -> {target}")
+        self._log(approved, action, edited_fields=edited_fields)
 
     def _reject(self, candidate: _Candidate, reason: str) -> None:
         tombstone = {
@@ -309,6 +361,7 @@ class ReviewSession:
         candidate.path.unlink()
         self.summary.rejected += 1
         typer.echo(f"rejected {candidate.entry.id}: {reason}")
+        self._log(candidate.entry, ReviewAction.REJECT, reason=reason)
 
     def _prompt_reject(self, candidate: _Candidate) -> None:
         while True:
@@ -342,6 +395,7 @@ class ReviewSession:
         self._apply_amendment(candidate, target_id)
         self.summary.approved += 1
         typer.echo(f"amended {target_id} with evidence from {candidate.entry.id}")
+        self._log(candidate.entry, ReviewAction.MERGE, reason=f"merged into {target_id}")
         return True
 
     def _edit(self, candidate: _Candidate) -> bool:
@@ -374,7 +428,12 @@ class ReviewSession:
                         return False
                     continue
 
-                self._approve(candidate, entry, body)
+                self._approve(
+                    candidate,
+                    entry,
+                    body,
+                    edited_fields=_edited_fields(candidate.entry, entry, candidate.body, body),
+                )
                 return True
         finally:
             tmp_path.unlink(missing_ok=True)
@@ -412,6 +471,7 @@ class ReviewSession:
                 self._prompt_reject(candidate)
             elif action == "skip":
                 self.summary.skipped += 1
+                self._log(candidate.entry, ReviewAction.SKIP)
             return action
 
 
