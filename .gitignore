@@ -21,4 +21,12 @@ node_modules/
 # Code runs hooks through Git Bash, where `\U`, `\M`, `\c` etc. are escapes:
 # the backslashes are eaten, the path collapses to one relative filename, and
 # `touch` creates it in whatever directory the session is running in.
-/C:*
+#
+# Matched on the distinctive middle of the name rather than its `C:` prefix:
+# NTFS cannot hold a colon, so the character on disk is U+F03A, which git sees
+# as three bytes while msys bash renders it back as `:`. A `C:*` pattern
+# therefore never matches, and `git check-ignore` reads it as an absolute path.
+*claude-notify-signals*
+.cairn/queue/
+.cairn/traces/
+.cairn/review-log.jsonl
