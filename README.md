@@ -212,7 +212,7 @@ sequenceDiagram
     Dev->>CC: works a task
     CC-->>Hook: SessionEnd, payload has session_id and transcript_path
     Hook->>Q: append job record, exit 0
-    Note over Hook,Q: under 50 ms, no network
+    Note over Hook,Q: p95 188 ms on Windows, no network
 
     W->>Q: poll or run on next session start
     W->>W: normalize transcript to Session Trace
@@ -477,7 +477,7 @@ Team distribution is git. There is no server, no sync protocol, and no account. 
 
 | Harness | Surface | Language |
 |---|---|---|
-| Claude Code | `hooks/hooks.json` in a plugin, plus a skill and a `SessionStart` context injection | Bash + Python |
+| Claude Code | `hooks/hooks.json` in a plugin, plus a skill and a `SessionStart` context injection | Python (stdlib only) |
 | opencode | Plugin module in `.opencode/plugins/`, `event` hook on session idle | TypeScript |
 | Cursor / Codex / Copilot / Gemini CLI | Generated block in `AGENTS.md` pointing at `.cairn/CONTEXT.md`, plus manual `cairn capture` | None — file convention |
 
@@ -490,7 +490,6 @@ Team distribution is git. There is no server, no sync protocol, and no account. 
 - **Python 3.11 or newer**
 - **`uv`** — [installation guide](https://docs.astral.sh/uv/getting-started/installation/)
 - **`git`** — the store is versioned with your code
-- **`jq`** — used by the Claude Code capture hook to parse the event payload
 - **An API key for your chosen provider** — `ANTHROPIC_API_KEY` by default. Not required for `--mock` runs.
 - At least one supported agent: Claude Code, opencode, or any tool that reads `AGENTS.md`
 
@@ -642,8 +641,8 @@ cairn validate --strict
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/.cairn/hooks/enqueue.sh",
-            "args": [],
+            "command": "/abs/path/to/python",
+            "args": ["/abs/path/to/repo/.cairn/hooks/enqueue.py"],
             "timeout": 5
           }
         ]
@@ -654,8 +653,8 @@ cairn validate --strict
         "hooks": [
           {
             "type": "command",
-            "command": "cairn",
-            "args": ["context", "--hook", "--budget", "1500"],
+            "command": "/abs/path/to/python",
+            "args": ["-m", "cairn", "context", "--hook", "--budget", "1500"],
             "timeout": 10
           }
         ]
@@ -665,31 +664,30 @@ cairn validate --strict
 }
 ```
 
-The `SessionEnd` hook reads the event JSON from stdin and exits immediately:
+Both commands are absolute paths, resolved by `cairn install claude-code` from
+the interpreter that ran it. That is not cosmetic. Claude Code spawns a hook
+command **directly** rather than through a shell, so:
 
-```bash
-#!/usr/bin/env bash
-# .cairn/hooks/enqueue.sh — must stay under the SessionEnd budget
-set -euo pipefail
+- a bare `cairn` resolves only if the console script happens to be on PATH,
+  which it is after `uv tool install` but not after a plain `uv sync`; and
+- a `.sh` file cannot be executed at all on Windows — the spawn fails with
+  `EFTYPE: inappropriate file type or format` before a single line of the
+  script runs.
 
-payload=$(cat)
-session_id=$(jq -r '.session_id' <<<"$payload")
-transcript=$(jq -r '.transcript_path' <<<"$payload")
-cwd=$(jq -r '.cwd' <<<"$payload")
+A consequence worth knowing: `.claude/settings.json` is machine-specific after
+install, so each checkout runs `cairn install claude-code` for itself.
 
-mkdir -p "$cwd/.cairn/queue"
-jq -nc \
-  --arg s "$session_id" \
-  --arg t "$transcript" \
-  --arg h "claude-code" \
-  --arg at "$(date -u +%FT%TZ)" \
-  '{session_id:$s, transcript_path:$t, harness:$h, enqueued_at:$at}' \
-  > "$cwd/.cairn/queue/$session_id.json"
+The `SessionEnd` hook reads the event JSON from stdin, appends one job record,
+and exits 0 on every path — including every failure path, so a broken Cairn
+install can never fail a session teardown. It is stdlib-only Python
+(`cairn/adapters/claude_code/enqueue.py`) and deliberately does not import
+`cairn`: Python is already a prerequisite of this project, and importing the
+package would drag pydantic, typer and rich into a job that needs `json` and
+`os`. An earlier version of this hook was bash and needed `jq`; both were
+silent prerequisites that failed without telling anyone.
 
-# detach the worker so it survives the agent exiting
-nohup cairn reflect --session "$session_id" >/dev/null 2>&1 &
-exit 0
-```
+`cairn doctor` does not take any of this on trust — it executes the registered
+hooks and checks what they actually produce.
 
 The `SessionStart` hook returns approved context through `additionalContext`, which Claude Code inserts at the start of the conversation:
 
@@ -838,7 +836,7 @@ Budgets are enforced in tests, not aspirational.
 
 | Stage | Budget | Enforcement |
 |---|---|---|
-| Capture hook | p95 < 50 ms, zero network calls | timing test in CI |
+| Capture hook | p95 < 250 ms, zero network calls | timing test in CI |
 | Queue write | Atomic, single file, no lock contention | concurrency test |
 | Reflect | p95 < 60 s per session | eval harness |
 | Context render | < 200 ms cold | timing test |
@@ -944,7 +942,7 @@ cairn/
 │   ├── adapters/
 │   │   ├── claude_code/
 │   │   │   ├── hooks.json
-│   │   │   ├── enqueue.sh
+│   │   │   ├── enqueue.py
 │   │   │   └── SKILL.md
 │   │   ├── opencode/
 │   │   │   └── plugin.ts

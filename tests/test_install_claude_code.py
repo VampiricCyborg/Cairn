@@ -2,7 +2,7 @@
 
 import hashlib
 import json
-import os
+import sys
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -40,23 +40,34 @@ def test_creates_settings_with_both_hooks(tmp_path: Path) -> None:
 
     assert exit_code == 0, output
     settings = _settings(tmp_path)
+
+    # Both hooks spawn <absolute interpreter> <args>: Claude Code spawns the
+    # command directly, so a bare `cairn` is only found when the console
+    # script happens to be on PATH, and a .sh cannot be run on Windows.
     session_end = settings["hooks"]["SessionEnd"][0]["hooks"][0]
-    assert session_end["command"].endswith(".cairn/hooks/enqueue.sh")
+    assert session_end["command"] == sys.executable
+    assert Path(session_end["args"][0]).name == "enqueue.py"
+    assert Path(session_end["args"][0]).is_absolute()
+
     session_start = settings["hooks"]["SessionStart"][0]["hooks"][0]
-    assert session_start["command"] == "cairn"
-    assert "--hook" in session_start["args"]
+    assert session_start["command"] == sys.executable
+    assert session_start["args"][:4] == ["-m", "cairn", "context", "--hook"]
+
+    # The template's documentation comment is not written into settings.
+    assert "_comment" not in settings
 
 
-def test_writes_executable_enqueue_script(tmp_path: Path) -> None:
+def test_writes_stdlib_only_enqueue_script(tmp_path: Path) -> None:
     _init(tmp_path)
 
     _install(tmp_path)
 
-    enqueue = tmp_path / ".cairn" / "hooks" / "enqueue.sh"
+    enqueue = tmp_path / ".cairn" / "hooks" / "enqueue.py"
     assert enqueue.is_file()
-    assert "enqueue.sh" in enqueue.read_text(encoding="utf-8")
-    if os.name != "nt":
-        assert enqueue.stat().st_mode & 0o111
+    source = enqueue.read_text(encoding="utf-8")
+    # Stdlib only: the hook must run on an interpreter that cannot import cairn.
+    assert "import cairn" not in source
+    assert "def enqueue(" in source
 
 
 def test_writes_skill_file(tmp_path: Path) -> None:
@@ -103,12 +114,12 @@ def test_merges_into_existing_unrelated_hooks_config(tmp_path: Path) -> None:
         hook["command"] for group in settings["hooks"]["SessionStart"] for hook in group["hooks"]
     ]
     assert "echo some-other-tool-hook" in session_start_commands
-    assert "cairn" in session_start_commands
+    assert sys.executable in session_start_commands
 
     # SessionEnd (absent before) was added.
-    assert settings["hooks"]["SessionEnd"][0]["hooks"][0]["command"].endswith(
-        ".cairn/hooks/enqueue.sh"
-    )
+    session_end = settings["hooks"]["SessionEnd"][0]["hooks"][0]
+    assert session_end["command"] == sys.executable
+    assert Path(session_end["args"][0]).name == "enqueue.py"
 
 
 def test_running_twice_is_idempotent(tmp_path: Path) -> None:

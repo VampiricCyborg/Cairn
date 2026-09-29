@@ -5,8 +5,10 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/.cairn/hooks/enqueue.sh",
-            "args": [],
+            "command": "C:\\Users\\Madhav\\PROJECTS\\productions\\Cairn\\.venv\\Scripts\\python.exe",
+            "args": [
+              "C:\\Users\\Madhav\\PROJECTS\\productions\\Cairn\\.cairn\\hooks\\enqueue.py"
+            ],
             "timeout": 5
           }
         ]
@@ -17,8 +19,10 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cairn",
+            "command": "C:\\Users\\Madhav\\PROJECTS\\productions\\Cairn\\.venv\\Scripts\\python.exe",
             "args": [
+              "-m",
+              "cairn",
               "context",
               "--hook",
               "--budget",

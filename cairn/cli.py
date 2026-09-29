@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tomllib
 from collections import Counter
 from collections.abc import Callable
@@ -826,14 +827,45 @@ def eval_suite(
 # -- install claude-code -------------------------------------------------------------
 
 
+#: Hook script basenames that identify Cairn's SessionEnd capture hook. The
+#: retired `.sh` is still matched so `cairn install claude-code` upgrades an
+#: existing registration in place, rather than leaving a dead bash hook
+#: registered beside the working Python one.
+_ENQUEUE_HOOK_SUFFIXES = (".cairn/hooks/enqueue.py", ".cairn/hooks/enqueue.sh")
+
+
 def _is_cairn_session_end_hook(hook: dict[str, Any]) -> bool:
-    command = str(hook.get("command", "")).replace("\\", "/")
-    return command.endswith(".cairn/hooks/enqueue.sh")
+    """Whether `hook` is Cairn's SessionEnd capture hook.
+
+    The script path is the `command` in the retired bash shape and the first
+    `arg` in the current `<python> <script>` one, so both are checked.
+    """
+
+    values = [str(hook.get("command", ""))]
+    args = hook.get("args")
+    if isinstance(args, list):
+        values.extend(str(arg) for arg in args)
+    return any(
+        value.replace("\\", "/").endswith(suffix)
+        for value in values
+        for suffix in _ENQUEUE_HOOK_SUFFIXES
+    )
 
 
 def _is_cairn_session_start_hook(hook: dict[str, Any]) -> bool:
+    """Whether `hook` is Cairn's SessionStart injection hook, in either the
+    current `<python> -m cairn context --hook` shape or the retired bare
+    `cairn context --hook` one."""
+
     args = hook.get("args")
-    return hook.get("command") == "cairn" and isinstance(args, list) and "--hook" in args
+    if not isinstance(args, list):
+        return False
+    arg_strings = [str(arg) for arg in args]
+    if "--hook" not in arg_strings:
+        return False
+    if str(hook.get("command", "")) == "cairn":
+        return True
+    return "cairn" in arg_strings and "context" in arg_strings
 
 
 _CAIRN_HOOK_MATCHERS: dict[str, Callable[[dict[str, Any]], bool]] = {
@@ -888,6 +920,31 @@ def _merge_hooks(existing: dict[str, Any], template: dict[str, Any]) -> dict[str
     return merged
 
 
+#: Placeholders in `adapters/claude_code/hooks.json`, resolved at install time.
+_HOOK_PYTHON_PLACEHOLDER = "__CAIRN_PYTHON__"
+_HOOK_ENQUEUE_PLACEHOLDER = "__CAIRN_ENQUEUE_PY__"
+
+
+def _render_hook_template(template: Any, substitutions: dict[str, str]) -> Any:
+    """Substitute the template's placeholder strings, dropping `_comment` keys.
+
+    Substitution happens on the *parsed* JSON rather than its text so that a
+    Windows interpreter path full of backslashes needs no JSON escaping.
+    """
+
+    if isinstance(template, str):
+        return substitutions.get(template, template)
+    if isinstance(template, list):
+        return [_render_hook_template(item, substitutions) for item in template]
+    if isinstance(template, dict):
+        return {
+            key: _render_hook_template(value, substitutions)
+            for key, value in template.items()
+            if key != "_comment"
+        }
+    return template
+
+
 @install_app.command(name="claude-code")
 def install_claude_code(
     path: Path = typer.Argument(
@@ -906,7 +963,22 @@ def install_claude_code(
         typer.echo(f"error: {cairn_root} does not exist; run `cairn init` first", err=True)
         raise typer.Exit(code=1)
 
-    template = json.loads((_CLAUDE_CODE_ADAPTER_DIR / "hooks.json").read_text(encoding="utf-8"))
+    hooks_dir = cairn_root / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    enqueue_dest = hooks_dir / "enqueue.py"
+    shutil.copyfile(_CLAUDE_CODE_ADAPTER_DIR / "enqueue.py", enqueue_dest)
+
+    # Absolute, resolved now: Claude Code spawns a hook command directly, so a
+    # bare `cairn` only works if it happens to be on PATH (a `uv tool install`,
+    # not a `uv sync`), and the interpreter running this install is the one
+    # that definitely has cairn importable.
+    template = _render_hook_template(
+        json.loads((_CLAUDE_CODE_ADAPTER_DIR / "hooks.json").read_text(encoding="utf-8")),
+        {
+            _HOOK_PYTHON_PLACEHOLDER: sys.executable,
+            _HOOK_ENQUEUE_PLACEHOLDER: str(enqueue_dest),
+        },
+    )
 
     claude_dir = repo_root / ".claude"
     claude_dir.mkdir(parents=True, exist_ok=True)
@@ -927,12 +999,6 @@ def install_claude_code(
     merged = _merge_hooks(existing, template)
     settings_path.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
 
-    hooks_dir = cairn_root / "hooks"
-    hooks_dir.mkdir(parents=True, exist_ok=True)
-    enqueue_dest = hooks_dir / "enqueue.sh"
-    shutil.copyfile(_CLAUDE_CODE_ADAPTER_DIR / "enqueue.sh", enqueue_dest)
-    enqueue_dest.chmod(0o755)
-
     skill_dir = claude_dir / "skills" / "cairn"
     skill_dir.mkdir(parents=True, exist_ok=True)
     skill_dest = skill_dir / "SKILL.md"
@@ -941,6 +1007,7 @@ def install_claude_code(
     typer.echo(f"Installed Claude Code adapter at {repo_root}")
     typer.echo(f"  hooks         {settings_path}")
     typer.echo(f"  enqueue hook  {enqueue_dest}")
+    typer.echo(f"  interpreter   {sys.executable}")
     typer.echo(f"  skill         {skill_dest}")
 
 
