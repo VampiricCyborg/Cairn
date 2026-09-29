@@ -68,7 +68,12 @@ def _init(root: Path) -> Store:
 
 
 def _files_under(directory: Path) -> list[Path]:
-    return sorted(path for path in directory.rglob("*") if path.is_file())
+    """Files under `directory`, ignoring the .gitkeep placeholders that keep the
+    committed store layout intact."""
+
+    return sorted(
+        path for path in directory.rglob("*") if path.is_file() and path.name != ".gitkeep"
+    )
 
 
 def _write_tombstone(store: Store, entry_id: str, title: str) -> None:

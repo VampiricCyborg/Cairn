@@ -48,7 +48,9 @@ def store(tmp_path: Path) -> Store:
 
 
 def _all_files(store: Store) -> list[Path]:
-    return sorted(path for path in store.root.rglob("*") if path.is_file())
+    return sorted(
+        path for path in store.root.rglob("*") if path.is_file() and path.name != ".gitkeep"
+    )
 
 
 def test_write_staged_writes_only_under_staging(store: Store) -> None:

@@ -29,7 +29,15 @@ jobs:
         run: uv run mypy cairn/core
 
   test:
-    runs-on: ubuntu-latest
+    # Windows is not optional here. The capture hook was completely broken on
+    # Windows -- a .sh file cannot be spawned, so SessionEnd died with EFTYPE --
+    # and a Linux-only matrix could not see it. The adapter, the hook probes in
+    # `cairn doctor`, and the store's path handling are all platform-sensitive.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: Set up uv

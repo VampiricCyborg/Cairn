@@ -70,7 +70,12 @@ def _set_config(store: Store, contents: str | None) -> None:
 
 
 def _entries_files(store: Store) -> list[Path]:
-    return sorted(path for path in store.entries_dir.rglob("*") if path.is_file())
+    """Entry files under entries/, ignoring the .gitkeep placeholders that keep
+    the committed layout intact (git cannot track an empty directory)."""
+
+    return sorted(
+        path for path in store.entries_dir.rglob("*") if path.is_file() and path.name != ".gitkeep"
+    )
 
 
 def test_init_writes_a_config_that_passes_the_gate(store: Store) -> None:

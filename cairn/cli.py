@@ -9,9 +9,11 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
 from collections import Counter
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -159,6 +161,17 @@ def init(
         _CONFIG_TOML_TEMPLATE.format(provider_name="mock"), encoding="utf-8"
     )
     (cairn_root / "CONTEXT.md").write_text("", encoding="utf-8")
+
+    # git cannot track an empty directory, so a store committed without these
+    # loses the layout SPEC.md says is committed: a fresh clone would have no
+    # entries/<type>/, staging/ or rejected/ at all.
+    for keep_dir in (
+        *(cairn_root / "entries" / entry_type.value for entry_type in EntryType),
+        cairn_root / "staging",
+        cairn_root / "rejected",
+    ):
+        keep_dir.mkdir(parents=True, exist_ok=True)
+        (keep_dir / ".gitkeep").touch()
 
     for schema_file in _SCHEMA_FILES:
         shutil.copyfile(_SCHEMA_SRC_DIR / schema_file, schema_dir / schema_file)
@@ -1045,6 +1058,31 @@ def install_opencode(
 
 
 # -- doctor ----------------------------------------------------------------------
+#
+# Doctor executes; it does not read. Every check here that describes something
+# runnable runs it, because the failure this tool exists to catch is exactly the
+# one inspection cannot see: a hook that is correctly registered and cannot
+# execute. A check that genuinely cannot be run reports UNVERIFIED, never PASS,
+# so "not checked" is never displayed as "works".
+
+PASS, WARN, FAIL, UNVERIFIED = "PASS", "WARN", "FAIL", "UNVERIFIED"
+
+#: The session id doctor's SessionEnd probe claims. Distinctive so a job file
+#: that ever escapes into a real queue is recognisable as a probe artifact.
+_PROBE_SESSION_ID = "cairn-doctor-probe"
+_PROBE_TIMEOUT_SECONDS = 30
+
+
+@dataclass
+class Check:
+    """One doctor row. `status` drives both the label and the exit code."""
+
+    status: str
+    name: str
+    detail: str
+
+    def render(self) -> str:
+        return f"{self.status:<10} {self.name:<13} {self.detail}"
 
 
 def _read_spec_version(cairn_root: Path) -> str:
@@ -1054,158 +1092,285 @@ def _read_spec_version(cairn_root: Path) -> str:
     return "unknown"
 
 
-def _doctor_store_line(cairn_root: Path) -> str:
+def _probe_binary(name: str, *args: str) -> tuple[bool, str]:
+    """Run `name` and report whether it is actually usable.
+
+    Presence on PATH is not the question: `shutil.which` answers that and still
+    misses a binary that is present and cannot execute. Running it is the only
+    evidence that counts.
+    """
+
+    try:
+        result = subprocess.run(
+            [name, *args], capture_output=True, text=True, timeout=10, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, str(exc)
+    output = (result.stdout or result.stderr or "").strip().splitlines()
+    return True, output[0] if output else f"exit {result.returncode}"
+
+
+def _doctor_store_check(cairn_root: Path) -> Check:
     try:
         store = Store(cairn_root)
     except StoreNotFoundError:
-        return f"FAIL store            {cairn_root} not found — run `cairn init`"
+        return Check(FAIL, "store", f"{cairn_root} not found — run `cairn init`")
     approved = len(store.approved())
     staged = len(store.load_all(status=EntryStatus.STAGED))
-    return (
-        f"PASS store            .cairn/ present, schema {_read_spec_version(cairn_root)}, "
-        f"{approved} entries, {staged} staged"
+    return Check(
+        PASS,
+        "store",
+        f".cairn/ present, schema {_read_spec_version(cairn_root)}, "
+        f"{approved} entries, {staged} staged",
     )
 
 
-def _doctor_git_line(repo_root: Path) -> str:
+def _doctor_git_check(repo_root: Path) -> Check:
+    runnable, detail = _probe_binary("git", "--version")
+    if not runnable:
+        return Check(FAIL, "git", f"git is not runnable ({detail}); Cairn shells out to it")
     if not (repo_root / ".git").exists():
-        return "WARN git              no .git directory found here"
+        return Check(WARN, "git", f"{detail}, but no .git directory here")
     gitignore = repo_root / ".gitignore"
     ignored = (
         gitignore.is_file()
         and ".cairn/queue/" in gitignore.read_text(encoding="utf-8").splitlines()
     )
-    if ignored:
-        return "PASS git              repository detected, .cairn/queue ignored"
-    return (
-        "WARN git              repository detected, .cairn/queue not gitignored — run `cairn init`"
-    )
+    if not ignored:
+        return Check(WARN, "git", f"{detail}, .cairn/queue not gitignored — run `cairn init`")
+    return Check(PASS, "git", f"{detail}, repository detected, .cairn/queue ignored")
 
 
-def _doctor_provider_line(cairn_root: Path) -> str:
+def _doctor_provider_check(cairn_root: Path) -> Check:
     name = load_provider_name(cairn_root)
     if name != "anthropic":
-        return f"PASS provider         {name}"
+        return Check(PASS, "provider", name)
     if os.environ.get("ANTHROPIC_API_KEY"):
-        return "PASS provider         anthropic, key found in env"
-    return "WARN provider         anthropic, ANTHROPIC_API_KEY not set"
+        return Check(PASS, "provider", "anthropic, key found in env")
+    return Check(WARN, "provider", "anthropic, ANTHROPIC_API_KEY not set")
 
 
-def _doctor_review_gate_line(cairn_root: Path) -> str:
-    """The `[review] require_human_approval` row.
-
-    A FAIL here is not cosmetic: `cairn review` refuses outright while the
-    gate is off, so nothing can reach `entries/` at all (see
-    `cairn.core.config.enforce_human_approval`).
-    """
+def _doctor_review_gate_check(cairn_root: Path) -> Check:
+    """`[review] require_human_approval`. A failure here is not cosmetic:
+    `cairn review` refuses outright while the gate is off, so nothing can reach
+    `entries/` at all."""
 
     problem = human_approval_problem(cairn_root)
     if problem is None:
-        return "PASS review           human approval required before anything reaches entries/"
-    return f"FAIL review           {problem} — `cairn review` will refuse"
+        return Check(PASS, "review", "human approval required before anything reaches entries/")
+    return Check(FAIL, "review", f"{problem} — `cairn review` will refuse")
 
 
-def _doctor_claude_code_line(repo_root: Path) -> str:
-    settings_path = repo_root / ".claude" / "settings.json"
-    if not settings_path.is_file():
-        return "WARN claude-code      not installed — run `cairn install claude-code`"
+def _hook_argv(hook: dict[str, Any]) -> list[str]:
+    """The hook's command line as Claude Code spawns it: command then args."""
+
+    argv = [str(hook.get("command", ""))]
+    args = hook.get("args")
+    if isinstance(args, list):
+        argv.extend(str(arg) for arg in args)
+    return argv
+
+
+def _probe_session_end_hook(hook: dict[str, Any]) -> tuple[bool, str]:
+    """Spawn the registered SessionEnd command exactly as Claude Code does --
+    argv, with the event JSON on stdin -- and check a job record appears.
+
+    The synthesized payload points `cwd` at a throwaway directory, so the probe
+    writes its job there and the real queue is never touched.
+
+    Exit status is deliberately not the pass condition. The capture hook is
+    required to exit 0 on every path, including every failure path, so the only
+    evidence it worked is the file it was supposed to write.
+    """
+
+    argv = _hook_argv(hook)
+    with tempfile.TemporaryDirectory(prefix="cairn-doctor-") as tmp:
+        payload = json.dumps(
+            {
+                "session_id": _PROBE_SESSION_ID,
+                "transcript_path": str(Path(tmp) / "probe-transcript.jsonl"),
+                "cwd": tmp,
+                "hook_event_name": "SessionEnd",
+                "reason": "other",
+            }
+        )
+        try:
+            result = subprocess.run(
+                argv,
+                input=payload,
+                capture_output=True,
+                text=True,
+                timeout=_PROBE_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except OSError as exc:
+            # The EFTYPE class of failure lands here: registered correctly,
+            # impossible to spawn. This is what doctor used to miss entirely.
+            return False, f"SessionEnd could not be spawned ({' '.join(argv)}): {exc}"
+        except subprocess.TimeoutExpired:
+            return False, f"SessionEnd timed out after {_PROBE_TIMEOUT_SECONDS}s"
+
+        job = Path(tmp) / ".cairn" / "queue" / f"{_PROBE_SESSION_ID}.json"
+        if not job.is_file():
+            stderr = (result.stderr or "").strip().splitlines()
+            hint = f" — {stderr[-1]}" if stderr else ""
+            return False, f"SessionEnd ran (exit {result.returncode}) but wrote no job file{hint}"
+        try:
+            record = json.loads(job.read_text(encoding="utf-8"))
+        except ValueError as exc:
+            return False, f"SessionEnd wrote a job file that is not valid JSON: {exc}"
+
+    missing = [
+        field
+        for field in ("session_id", "transcript_path", "harness", "enqueued_at")
+        if not record.get(field)
+    ]
+    if missing:
+        return False, f"SessionEnd job record is missing {', '.join(missing)}"
+    if record.get("session_id") != _PROBE_SESSION_ID:
+        return False, "SessionEnd job record has the wrong session_id"
+    return True, "SessionEnd wrote a job record"
+
+
+def _probe_session_start_hook(hook: dict[str, Any]) -> tuple[bool, str]:
+    """Run the registered SessionStart command and check it emits the
+    `additionalContext` shape Claude Code injects.
+
+    Run against a throwaway store, because this command sweeps the queue:
+    probing it inside the real store would consume the user's pending capture
+    jobs as a side effect of asking whether it works.
+    """
+
+    argv = _hook_argv(hook)
+    with tempfile.TemporaryDirectory(prefix="cairn-doctor-") as tmp:
+        (Path(tmp) / ".cairn" / "entries").mkdir(parents=True, exist_ok=True)
+        try:
+            result = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=_PROBE_TIMEOUT_SECONDS,
+                cwd=tmp,
+                check=False,
+            )
+        except OSError as exc:
+            return False, f"SessionStart could not be spawned ({' '.join(argv)}): {exc}"
+        except subprocess.TimeoutExpired:
+            return False, f"SessionStart timed out after {_PROBE_TIMEOUT_SECONDS}s"
+
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip().splitlines()
+        hint = f" — {stderr[-1]}" if stderr else ""
+        return False, f"SessionStart exited {result.returncode}{hint}"
     try:
-        settings = json.loads(settings_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return f"FAIL claude-code      {settings_path} is not valid JSON"
-    if not isinstance(settings, dict):
-        return f"FAIL claude-code      {settings_path} does not contain a JSON object"
+        payload = json.loads(result.stdout)
+    except ValueError:
+        printed = (result.stdout or "").strip().splitlines()
+        head = printed[0][:60] if printed else "(no output)"
+        return False, f"SessionStart did not emit JSON: {head}"
+    specific = payload.get("hookSpecificOutput") if isinstance(payload, dict) else None
+    if not isinstance(specific, dict) or "additionalContext" not in specific:
+        return False, "SessionStart JSON has no hookSpecificOutput.additionalContext"
+    return True, "SessionStart returned additionalContext"
+
+
+def _registered_cairn_hooks(settings: dict[str, Any]) -> dict[str, dict[str, Any] | None]:
+    """The registered Cairn hook for each event, or None where none matches."""
 
     hooks = settings.get("hooks")
     hooks = hooks if isinstance(hooks, dict) else {}
-
-    def _has_cairn_hook(event: str, matcher: Callable[[dict[str, Any]], bool]) -> bool:
-        groups = hooks.get(event) or []
-        return any(
-            matcher(hook)
-            for group in groups
-            if isinstance(group, dict)
-            for hook in group.get("hooks", [])
-            if isinstance(hook, dict)
+    return {
+        event: next(
+            (
+                hook
+                for group in hooks.get(event) or []
+                if isinstance(group, dict)
+                for hook in group.get("hooks", [])
+                if isinstance(hook, dict) and matcher(hook)
+            ),
+            None,
         )
+        for event, matcher in _CAIRN_HOOK_MATCHERS.items()
+    }
 
-    has_end = _has_cairn_hook("SessionEnd", _is_cairn_session_end_hook)
-    has_start = _has_cairn_hook("SessionStart", _is_cairn_session_start_hook)
 
+def _doctor_claude_code_check(repo_root: Path) -> Check:
+    settings_path = repo_root / ".claude" / "settings.json"
     install_hint = "run `cairn install claude-code`"
-    if has_end and has_start:
-        return "PASS claude-code      SessionEnd + SessionStart hooks registered"
-    if has_end:
-        return f"WARN claude-code      SessionEnd registered, SessionStart missing — {install_hint}"
-    if has_start:
-        return f"WARN claude-code      SessionStart registered, SessionEnd missing — {install_hint}"
-    return f"WARN claude-code      hooks not registered — {install_hint}"
+    if not settings_path.is_file():
+        return Check(WARN, "claude-code", f"not installed — {install_hint}")
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return Check(FAIL, "claude-code", f"{settings_path} is not valid JSON")
+    if not isinstance(settings, dict):
+        return Check(FAIL, "claude-code", f"{settings_path} does not contain a JSON object")
+
+    registered = _registered_cairn_hooks(settings)
+    missing = [event for event, hook in registered.items() if hook is None]
+    if missing:
+        return Check(WARN, "claude-code", f"{', '.join(missing)} not registered — {install_hint}")
+
+    probes = [
+        _probe_session_end_hook(registered["SessionEnd"] or {}),
+        _probe_session_start_hook(registered["SessionStart"] or {}),
+    ]
+    failures = [detail for ok, detail in probes if not ok]
+    if failures:
+        return Check(FAIL, "claude-code", "; ".join(failures))
+    return Check(PASS, "claude-code", "; ".join(detail for _, detail in probes))
 
 
 def _parse_version(text: str) -> tuple[int, ...] | None:
     """Best-effort dotted-integer version parse, e.g. `"1.18.30"` ->
-    `(1, 18, 30)`. `None` for anything without a leading digit run (a
-    missing binary, an unexpected `--version` format, etc.) -- callers
-    treat that as "nothing to check," not a failure."""
+    `(1, 18, 30)`. `None` for anything without a leading digit run."""
 
-    match = re.match(r"(\d+(?:\.\d+)*)", text.strip())
+    match = re.search(r"(\d+(?:\.\d+)+)", text.strip())
     if not match:
         return None
     return tuple(int(part) for part in match.group(1).split("."))
 
 
-def _check_opencode_version() -> str | None:
-    """`None` if the installed opencode CLI is at or above
-    `_OPENCODE_MIN_VERSION` -- the version `plugin.ts` was verified against
-    -- or if opencode isn't on PATH or its version can't be parsed (there is
-    nothing to warn about yet in either case). A short warning string
-    otherwise.
+def _doctor_opencode_check(repo_root: Path) -> Check:
+    plugin = repo_root / ".opencode" / "plugins" / "cairn.ts"
+    if not plugin.is_file():
+        return Check(WARN, "opencode", "no plugin found — run `cairn install opencode`")
 
-    This exists because opencode's plugin surface has moved before, per the
-    README's adapter-surface-drift risk: a `cairn doctor` on an opencode
-    install older than what this adapter was built against should say so,
-    rather than silently assuming `session.idle` and `client.session.messages`
-    still behave the way `cairn.core.normalizer.normalize_opencode_transcript`
-    expects.
-    """
-
-    try:
-        result = subprocess.run(
-            ["opencode", "--version"], capture_output=True, text=True, timeout=5, check=False
+    runnable, detail = _probe_binary("opencode", "--version")
+    if not runnable:
+        # The plugin file is in place, but nothing here has shown opencode can
+        # load it. That is not the same as working.
+        return Check(
+            UNVERIFIED,
+            "opencode",
+            f"plugin linked, but opencode is not runnable here ({detail}) — capture unproven",
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
 
-    installed = _parse_version(result.stdout) or _parse_version(result.stderr)
+    installed = _parse_version(detail)
     minimum = _parse_version(_OPENCODE_MIN_VERSION)
-    if installed is None or minimum is None or installed >= minimum:
-        return None
-    return (
-        f"opencode {'.'.join(map(str, installed))} is older than {_OPENCODE_MIN_VERSION}, "
-        "the version this adapter was last verified against"
+    if installed and minimum and installed < minimum:
+        return Check(
+            WARN,
+            "opencode",
+            f"plugin linked, opencode {'.'.join(map(str, installed))} is older than "
+            f"{_OPENCODE_MIN_VERSION}, the version this adapter was verified against",
+        )
+    return Check(
+        UNVERIFIED,
+        "opencode",
+        f"plugin linked, opencode present ({detail}) — its session.idle hook cannot be "
+        "exercised from here; only a real opencode session proves capture",
     )
 
 
-def _doctor_opencode_line(repo_root: Path) -> str:
-    plugin = repo_root / ".opencode" / "plugins" / "cairn.ts"
-    if not plugin.is_file():
-        return "WARN opencode         no plugin found — run `cairn install opencode`"
-
-    version_warning = _check_opencode_version()
-    if version_warning:
-        return f"WARN opencode         plugin linked at {plugin}; {version_warning}"
-    return f"PASS opencode         plugin linked at {plugin}"
-
-
-def _doctor_agents_md_line(repo_root: Path) -> str:
+def _doctor_agents_md_check(repo_root: Path) -> Check:
     agents_md = repo_root / "AGENTS.md"
     if not agents_md.is_file():
-        return "WARN agents-md        no AGENTS.md found — run: cairn install agents-md"
+        return Check(WARN, "agents-md", "no AGENTS.md found — run: cairn install agents-md")
     if "cairn:begin" in agents_md.read_text(encoding="utf-8"):
-        return "PASS agents-md        pointer block present"
-    return (
-        "WARN agents-md        AGENTS.md found, no Cairn pointer block — "
-        "run: cairn install agents-md"
+        return Check(PASS, "agents-md", "pointer block present")
+    return Check(
+        WARN, "agents-md", "AGENTS.md found, no Cairn pointer block — run: cairn install agents-md"
     )
 
 
@@ -1213,19 +1378,33 @@ def _doctor_agents_md_line(repo_root: Path) -> str:
 def doctor(
     path: Path = typer.Argument(Path("."), help="Repository root containing `.cairn/`."),
 ) -> None:
-    """Check that the store, git integration, provider, and adapters are wired up correctly."""
+    """Check that the store, git integration, provider, and adapters work.
+
+    Exits non-zero if any check FAILs. UNVERIFIED is not a failure: it means the
+    check could not be run here, which is reported rather than assumed away.
+    """
 
     repo_root = path.resolve()
     cairn_root = repo_root / ".cairn"
 
     typer.echo(f"cairn {__version__}  ·  spec {_read_spec_version(cairn_root)}")
-    typer.echo(_doctor_store_line(cairn_root))
-    typer.echo(_doctor_git_line(repo_root))
-    typer.echo(_doctor_provider_line(cairn_root))
-    typer.echo(_doctor_review_gate_line(cairn_root))
-    typer.echo(_doctor_claude_code_line(repo_root))
-    typer.echo(_doctor_opencode_line(repo_root))
-    typer.echo(_doctor_agents_md_line(repo_root))
+    checks = [
+        _doctor_store_check(cairn_root),
+        _doctor_git_check(repo_root),
+        _doctor_provider_check(cairn_root),
+        _doctor_review_gate_check(cairn_root),
+        _doctor_claude_code_check(repo_root),
+        _doctor_opencode_check(repo_root),
+        _doctor_agents_md_check(repo_root),
+    ]
+    for check in checks:
+        typer.echo(check.render())
+
+    failures = [check for check in checks if check.status == FAIL]
+    if failures:
+        typer.echo("")
+        typer.echo(f"{len(failures)} check(s) failed: {', '.join(c.name for c in failures)}")
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":
