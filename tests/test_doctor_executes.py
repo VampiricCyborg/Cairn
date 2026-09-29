@@ -46,7 +46,7 @@ def _doctor(tmp_path: Path) -> tuple[int, str]:
 
 
 def _settings_path(tmp_path: Path) -> Path:
-    return tmp_path / ".claude" / "settings.json"
+    return tmp_path / ".claude" / "settings.local.json"
 
 
 def _load_settings(tmp_path: Path) -> dict:
@@ -261,3 +261,30 @@ def test_a_clone_of_the_committed_store_validates(tmp_path: Path) -> None:
 
     validated = runner.invoke(app, ["validate", str(clone), "--strict"])
     assert validated.exit_code == 0, validated.output
+
+
+def test_doctor_names_the_settings_file_the_registration_came_from(tmp_path: Path) -> None:
+    _init(tmp_path)
+    _install(tmp_path)
+
+    _, output = _doctor(tmp_path)
+
+    assert "from settings.local.json" in output
+
+
+def test_registration_in_both_scopes_fails_doctor(tmp_path: Path) -> None:
+    """Hook lists merge across scopes instead of overriding, so a registration
+    in both files means capture runs twice per session, not once."""
+
+    _init(tmp_path)
+    _install(tmp_path)
+    claude_dir = tmp_path / ".claude"
+    (claude_dir / "settings.json").write_text(
+        (claude_dir / "settings.local.json").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+
+    exit_code, output = _doctor(tmp_path)
+
+    assert exit_code != 0, output
+    assert "FAIL claude-code" in output
+    assert "twice per session" in output

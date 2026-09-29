@@ -23,7 +23,11 @@ def _install(tmp_path: Path) -> tuple[int, str]:
 
 
 def _settings(tmp_path: Path) -> dict[str, object]:
-    return json.loads((tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    """The LOCAL settings file: the registration carries this machine's absolute
+    interpreter path, so it belongs in the per-project personal file that
+    Claude Code keeps out of git, not in the shared committed one."""
+
+    return json.loads((tmp_path / ".claude" / "settings.local.json").read_text(encoding="utf-8"))
 
 
 def test_requires_cairn_init_first(tmp_path: Path) -> None:
@@ -98,7 +102,9 @@ def test_merges_into_existing_unrelated_hooks_config(tmp_path: Path) -> None:
             ],
         },
     }
-    (claude_dir / "settings.json").write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    (claude_dir / "settings.local.json").write_text(
+        json.dumps(existing, indent=2), encoding="utf-8"
+    )
 
     exit_code, output = _install(tmp_path)
 
@@ -127,7 +133,7 @@ def test_running_twice_is_idempotent(tmp_path: Path) -> None:
 
     first_exit, first_output = _install(tmp_path)
     assert first_exit == 0, first_output
-    settings_path = tmp_path / ".claude" / "settings.json"
+    settings_path = tmp_path / ".claude" / "settings.local.json"
     first_bytes = settings_path.read_bytes()
     first_hash = hashlib.sha256(first_bytes).hexdigest()
 
@@ -150,7 +156,7 @@ def test_running_twice_preserves_other_tools_hooks_added_between_runs(tmp_path: 
     _init(tmp_path)
     _install(tmp_path)
 
-    settings_path = tmp_path / ".claude" / "settings.json"
+    settings_path = tmp_path / ".claude" / "settings.local.json"
     settings = json.loads(settings_path.read_text(encoding="utf-8"))
     settings["hooks"].setdefault("PreToolUse", []).append(
         {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo added-later"}]}
@@ -174,9 +180,72 @@ def test_errors_cleanly_on_invalid_existing_settings_json(tmp_path: Path) -> Non
     _init(tmp_path)
     claude_dir = tmp_path / ".claude"
     claude_dir.mkdir()
-    (claude_dir / "settings.json").write_text("{not valid json", encoding="utf-8")
+    (claude_dir / "settings.local.json").write_text("{not valid json", encoding="utf-8")
 
     exit_code, output = _install(tmp_path)
 
     assert exit_code == 1
     assert "not valid JSON" in output
+
+
+def test_registration_goes_to_the_local_file_not_the_shared_one(tmp_path: Path) -> None:
+    _init(tmp_path)
+
+    _install(tmp_path)
+
+    assert (tmp_path / ".claude" / "settings.local.json").is_file()
+    assert not (tmp_path / ".claude" / "settings.json").exists()
+
+
+def test_local_settings_are_gitignored(tmp_path: Path) -> None:
+    """The registration is machine-specific, so committing it would hand every
+    other checkout this machine's interpreter path."""
+
+    _init(tmp_path)
+
+    _install(tmp_path)
+
+    ignored = (tmp_path / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert ".claude/settings.local.json" in ignored
+
+
+def test_a_stale_shared_registration_is_removed(tmp_path: Path) -> None:
+    """Claude Code MERGES hook lists across scopes rather than letting one
+    override the other, so a registration left in the shared file would fire
+    the capture hook a second time per session."""
+
+    _init(tmp_path)
+    _install(tmp_path)
+    shared = tmp_path / ".claude" / "settings.json"
+    shared.write_text(
+        (tmp_path / ".claude" / "settings.local.json").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+    exit_code, output = _install(tmp_path)
+
+    assert exit_code == 0, output
+    assert "removed from" in output
+    assert json.loads(shared.read_text(encoding="utf-8")) == {}
+
+
+def test_cleaning_the_shared_file_leaves_other_tools_alone(tmp_path: Path) -> None:
+    _init(tmp_path)
+    _install(tmp_path)
+    shared = tmp_path / ".claude" / "settings.json"
+    local = json.loads((tmp_path / ".claude" / "settings.local.json").read_text(encoding="utf-8"))
+    local["hooks"]["SessionStart"].append(
+        {"hooks": [{"type": "command", "command": "echo other-tool"}]}
+    )
+    local["permissions"] = {"allow": ["Bash(git status)"]}
+    shared.write_text(json.dumps(local, indent=2), encoding="utf-8")
+
+    exit_code, output = _install(tmp_path)
+
+    assert exit_code == 0, output
+    remaining = json.loads(shared.read_text(encoding="utf-8"))
+    assert remaining["permissions"] == {"allow": ["Bash(git status)"]}
+    commands = [
+        hook["command"] for group in remaining["hooks"]["SessionStart"] for hook in group["hooks"]
+    ]
+    assert commands == ["echo other-tool"]

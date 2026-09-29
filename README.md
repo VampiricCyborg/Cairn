@@ -674,8 +674,24 @@ command **directly** rather than through a shell, so:
   `EFTYPE: inappropriate file type or format` before a single line of the
   script runs.
 
-A consequence worth knowing: `.claude/settings.json` is machine-specific after
-install, so each checkout runs `cairn install claude-code` for itself.
+Because the registration is machine-specific, it is written to
+**`.claude/settings.local.json`** — the per-project personal file Claude Code
+keeps out of git — and never to the shared, committed `.claude/settings.json`.
+Each checkout runs `cairn install claude-code` for itself.
+
+This matters more than a tidiness preference. Claude Code **merges** hook lists
+across scopes rather than letting one override the other, so the same
+registration present in both files does not win once, it fires the capture hook
+twice per session. `cairn install claude-code` therefore strips any Cairn
+registration it finds in the shared file (leaving every other tool's hooks
+alone), and `cairn doctor` reports which file the live registration came from
+and FAILs if it finds one in both.
+
+**Known limitation, not worked around:** cloud Claude Code sessions do not read
+`settings.local.json`, so a cloud session gets no capture at all. The
+alternative — committing an absolute interpreter path into the shared file —
+would be wrong on every machine but the one that ran the install. Local capture
+is the supported path until Cairn is installed as a resolvable console script.
 
 The `SessionEnd` hook reads the event JSON from stdin, appends one job record,
 and exits 0 on every path — including every failure path, so a broken Cairn

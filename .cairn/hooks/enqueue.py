@@ -39,6 +39,11 @@ import time
 HARNESS = "claude-code"
 TRACE_ENV = "CAIRN_HOOK_DEBUG"
 TRACE_PATH_ENV = "CAIRN_HOOK_DEBUG_LOG"
+#: Optional marker recorded in the capture log so headless runs can be told
+#: apart from interactive ones later. Nothing sets it automatically: the
+#: SessionEnd payload carries no mode, so an unset value means "unrecorded"
+#: rather than "interactive".
+MODE_ENV = "CAIRN_CAPTURE_MODE"
 
 
 def _iso_now() -> str:
@@ -116,6 +121,7 @@ def _log_capture(
             "reason": reason,
             "enqueued": enqueued,
             "error": error,
+            "mode": os.environ.get(MODE_ENV) or None,
             "pid": os.getpid(),
         },
     )

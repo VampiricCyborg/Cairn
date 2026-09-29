@@ -32,3 +32,4 @@ node_modules/
 .cairn/review-log.jsonl
 .cairn/capture-log.jsonl
 .cairn/hook-trace.jsonl
+.claude/settings.local.json

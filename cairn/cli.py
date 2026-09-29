@@ -59,6 +59,17 @@ _SCHEMA_SRC_DIR = Path(__file__).resolve().parent / "schema"
 _SCHEMA_FILES = ("entry.schema.json", "trace.schema.json")
 _ADAPTERS_DIR = Path(__file__).resolve().parent / "adapters"
 _CLAUDE_CODE_ADAPTER_DIR = _ADAPTERS_DIR / "claude_code"
+
+#: Claude Code reads both of these, and hook lists MERGE across scopes rather
+#: than override. A registration present in both would fire the capture hook
+#: twice per session, so Cairn keeps it in exactly one: the local file.
+#: settings.json is the shared, committed file; settings.local.json is the
+#: per-project personal one Claude Code keeps out of git. The registration is
+#: machine-specific -- it carries this machine's absolute interpreter path --
+#: so it belongs in the local file and must never be committed.
+_SHARED_SETTINGS = ("settings.json",)
+_LOCAL_SETTINGS = "settings.local.json"
+_LOCAL_SETTINGS_IGNORE = ".claude/settings.local.json"
 _OPENCODE_ADAPTER_DIR = _ADAPTERS_DIR / "opencode"
 
 #: The opencode CLI version `cairn/adapters/opencode/plugin.ts` was last
@@ -125,7 +136,7 @@ def main(
         raise typer.Exit()
 
 
-def _ensure_gitignore(repo_root: Path) -> None:
+def _ensure_gitignore(repo_root: Path, lines: list[str]) -> None:
     """Append the two gitignored `.cairn/` paths to `repo_root/.gitignore`,
     creating a minimal one if it does not already exist."""
 
@@ -133,7 +144,7 @@ def _ensure_gitignore(repo_root: Path) -> None:
     if gitignore_path.exists():
         existing = gitignore_path.read_text(encoding="utf-8")
         existing_lines = set(existing.splitlines())
-        missing = [line for line in _GITIGNORE_LINES if line not in existing_lines]
+        missing = [line for line in lines if line not in existing_lines]
         if missing:
             with gitignore_path.open("a", encoding="utf-8") as handle:
                 if existing and not existing.endswith("\n"):
@@ -141,7 +152,7 @@ def _ensure_gitignore(repo_root: Path) -> None:
                 for line in missing:
                     handle.write(line + "\n")
     else:
-        gitignore_path.write_text("\n".join(_GITIGNORE_LINES) + "\n", encoding="utf-8")
+        gitignore_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 @app.command()
@@ -184,7 +195,7 @@ def init(
     for schema_file in _SCHEMA_FILES:
         shutil.copyfile(_SCHEMA_SRC_DIR / schema_file, schema_dir / schema_file)
 
-    _ensure_gitignore(repo_root)
+    _ensure_gitignore(repo_root, _GITIGNORE_LINES)
 
     typer.echo(f"Initialized Cairn store at {cairn_root}")
     typer.echo(f"  VERSION       {cairn_root / 'VERSION'}")
@@ -1095,6 +1106,63 @@ def _render_hook_template(template: Any, substitutions: dict[str, str]) -> Any:
     return template
 
 
+def _strip_cairn_hooks(settings: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """`settings` with any Cairn hook registration removed, and how many went.
+
+    Used to clean a stale registration out of the shared, committed
+    settings.json when install moves it to the local file: leaving it in both
+    would fire the capture hook twice per session, because Claude Code merges
+    hook lists across scopes instead of letting one override the other. Every
+    other tool's hooks, and every unrelated setting, are left untouched.
+    """
+
+    cleaned = copy.deepcopy(settings)
+    hooks = cleaned.get("hooks")
+    if not isinstance(hooks, dict):
+        return cleaned, 0
+
+    removed = 0
+    for event, matcher in _CAIRN_HOOK_MATCHERS.items():
+        groups = hooks.get(event)
+        if not isinstance(groups, list):
+            continue
+        kept_groups = []
+        for group in groups:
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                kept_groups.append(group)
+                continue
+            kept_hooks = [
+                hook for hook in group["hooks"] if not (isinstance(hook, dict) and matcher(hook))
+            ]
+            removed += len(group["hooks"]) - len(kept_hooks)
+            if kept_hooks:
+                kept_groups.append({**group, "hooks": kept_hooks})
+        if kept_groups:
+            hooks[event] = kept_groups
+        else:
+            hooks.pop(event, None)
+    if not hooks:
+        cleaned.pop("hooks", None)
+    return cleaned, removed
+
+
+def _load_settings(path: Path) -> dict[str, Any]:
+    """Parse a Claude Code settings file, or raise typer.Exit with a clear
+    message. A missing file is an empty document, not an error."""
+
+    if not path.is_file():
+        return {}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        typer.echo(f"error: {path} is not valid JSON: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    if not isinstance(loaded, dict):
+        typer.echo(f"error: {path} does not contain a JSON object", err=True)
+        raise typer.Exit(code=1)
+    return loaded
+
+
 @install_app.command(name="claude-code")
 def install_claude_code(
     path: Path = typer.Argument(
@@ -1132,22 +1200,26 @@ def install_claude_code(
 
     claude_dir = repo_root / ".claude"
     claude_dir.mkdir(parents=True, exist_ok=True)
-    settings_path = claude_dir / "settings.json"
+    settings_path = claude_dir / _LOCAL_SETTINGS
 
-    existing: dict[str, Any] = {}
-    if settings_path.is_file():
-        try:
-            loaded = json.loads(settings_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            typer.echo(f"error: {settings_path} is not valid JSON: {exc}", err=True)
-            raise typer.Exit(code=1) from exc
-        if not isinstance(loaded, dict):
-            typer.echo(f"error: {settings_path} does not contain a JSON object", err=True)
-            raise typer.Exit(code=1)
-        existing = loaded
-
-    merged = _merge_hooks(existing, template)
+    merged = _merge_hooks(_load_settings(settings_path), template)
     settings_path.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+
+    # The registration carries this machine's absolute interpreter path, so it
+    # must not reach the shared file. A stale one left there would not override
+    # this one -- Claude Code merges hook lists across scopes -- it would fire
+    # the capture hook a second time per session.
+    cleaned_files: list[str] = []
+    for shared_name in _SHARED_SETTINGS:
+        shared_path = claude_dir / shared_name
+        if not shared_path.is_file():
+            continue
+        cleaned, removed = _strip_cairn_hooks(_load_settings(shared_path))
+        if removed:
+            shared_path.write_text(json.dumps(cleaned, indent=2) + "\n", encoding="utf-8")
+            cleaned_files.append(f"{shared_path} ({removed} hook(s))")
+
+    _ensure_gitignore(repo_root, [_LOCAL_SETTINGS_IGNORE])
 
     skill_dir = claude_dir / "skills" / "cairn"
     skill_dir.mkdir(parents=True, exist_ok=True)
@@ -1156,6 +1228,8 @@ def install_claude_code(
 
     typer.echo(f"Installed Claude Code adapter at {repo_root}")
     typer.echo(f"  hooks         {settings_path}")
+    for cleaned_file in cleaned_files:
+        typer.echo(f"  removed from  {cleaned_file} — hooks merge across scopes, not override")
     typer.echo(f"  enqueue hook  {enqueue_dest}")
     typer.echo(f"  interpreter   {sys.executable}")
     typer.echo(f"  skill         {skill_dest}")
@@ -1432,21 +1506,47 @@ def _registered_cairn_hooks(settings: dict[str, Any]) -> dict[str, dict[str, Any
 
 
 def _doctor_claude_code_check(repo_root: Path) -> Check:
-    settings_path = repo_root / ".claude" / "settings.json"
-    install_hint = "run `cairn install claude-code`"
-    if not settings_path.is_file():
-        return Check(WARN, "claude-code", f"not installed — {install_hint}")
-    try:
-        settings = json.loads(settings_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return Check(FAIL, "claude-code", f"{settings_path} is not valid JSON")
-    if not isinstance(settings, dict):
-        return Check(FAIL, "claude-code", f"{settings_path} does not contain a JSON object")
+    """Which settings file the registration came from, and whether it runs.
 
-    registered = _registered_cairn_hooks(settings)
+    Both scopes are checked because Claude Code merges hook lists across them:
+    a registration in both files is not a redundancy, it is the capture hook
+    firing twice per session.
+    """
+
+    claude_dir = repo_root / ".claude"
+    install_hint = "run `cairn install claude-code`"
+
+    found: dict[str, dict[str, dict[str, Any] | None]] = {}
+    for name in (_LOCAL_SETTINGS, *_SHARED_SETTINGS):
+        path = claude_dir / name
+        if not path.is_file():
+            continue
+        try:
+            settings = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return Check(FAIL, "claude-code", f"{path} is not valid JSON")
+        if not isinstance(settings, dict):
+            return Check(FAIL, "claude-code", f"{path} does not contain a JSON object")
+        hooks = _registered_cairn_hooks(settings)
+        if any(hook is not None for hook in hooks.values()):
+            found[name] = hooks
+
+    if not found:
+        return Check(WARN, "claude-code", f"not installed — {install_hint}")
+    if len(found) > 1:
+        return Check(
+            FAIL,
+            "claude-code",
+            f"registered in {' and '.join(sorted(found))} — hook lists merge across scopes, "
+            f"so capture would run twice per session; {install_hint} to clean up",
+        )
+
+    source, registered = next(iter(found.items()))
     missing = [event for event, hook in registered.items() if hook is None]
     if missing:
-        return Check(WARN, "claude-code", f"{', '.join(missing)} not registered — {install_hint}")
+        return Check(
+            WARN, "claude-code", f"{', '.join(missing)} not registered in {source} — {install_hint}"
+        )
 
     probes = [
         _probe_session_end_hook(registered["SessionEnd"] or {}),
@@ -1467,7 +1567,8 @@ def _doctor_claude_code_check(repo_root: Path) -> Check:
     return Check(
         UNVERIFIED,
         "claude-code",
-        "; ".join(detail for _, detail in probes)
+        f"from {source}: "
+        + "; ".join(detail for _, detail in probes)
         + " — both spawn correctly, but capture under a real session lifecycle is "
         "lossy and unproven here; run `cairn stats --capture` for the measured rate",
     )
