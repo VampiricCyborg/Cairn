@@ -30,3 +30,5 @@ node_modules/
 .cairn/queue/
 .cairn/traces/
 .cairn/review-log.jsonl
+.cairn/capture-log.jsonl
+.cairn/hook-trace.jsonl

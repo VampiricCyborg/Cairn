@@ -10,10 +10,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -105,7 +107,13 @@ patterns   = ["sk-[A-Za-z0-9]{{20,}}", "ghp_[A-Za-z0-9]{{36}}", "AKIA[0-9A-Z]{{1
 require_human_approval = true        # v0 refuses to run without this
 """
 
-_GITIGNORE_LINES = [".cairn/queue/", ".cairn/traces/", ".cairn/review-log.jsonl"]
+_GITIGNORE_LINES = [
+    ".cairn/queue/",
+    ".cairn/traces/",
+    ".cairn/review-log.jsonl",
+    ".cairn/capture-log.jsonl",
+    ".cairn/hook-trace.jsonl",
+]
 
 
 @app.callback(invoke_without_command=True)
@@ -649,29 +657,158 @@ def _render_review_stats(records: list[ReviewLogRecord]) -> list[str]:
     return lines
 
 
+#: Claude Code stores each session transcript under a slug of the project path,
+#: e.g. `C:\\Users\\me\\proj` -> `C--Users-me-proj`. Those files are the only
+#: record of sessions whose SessionEnd hook never ran, which makes them the
+#: denominator for the capture rate -- the capture log alone can only count the
+#: runs that happened.
+#: How long after its last write a transcript is assumed to belong to a
+#: finished session. A capture hook fires within a few hundred ms of the
+#: end, so two minutes is generous while still excluding in-flight sessions.
+_IN_FLIGHT_GRACE_SECONDS = 120
+
+_CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
+
+
+def _claude_project_slug(repo_root: Path) -> str:
+    return re.sub(r"[:/\\]", "-", str(repo_root))
+
+
+def _session_transcripts(repo_root: Path) -> list[Path]:
+    directory = _CLAUDE_PROJECTS_DIR / _claude_project_slug(repo_root)
+    if not directory.is_dir():
+        return []
+    return sorted(directory.glob("*.jsonl"))
+
+
+def _read_capture_log(cairn_root: Path) -> list[dict[str, Any]]:
+    path = cairn_root / "capture-log.jsonl"
+    if not path.is_file():
+        return []
+    records: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            logger.warning("skipping unreadable capture-log line in %s", path)
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
+
+
+def _capture_window_start(records: list[dict[str, Any]], cairn_root: Path) -> float | None:
+    """Epoch seconds from which capture could have happened at all.
+
+    The first capture-log entry, or -- with an empty log -- the installed
+    hook'''s mtime. Anything earlier is a session that ended before this machine
+    had a working capture hook.
+    """
+
+    stamps = [str(record.get("ts") or "") for record in records]
+    parsed = []
+    for stamp in stamps:
+        try:
+            parsed.append(datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC))
+        except ValueError:
+            continue
+    if parsed:
+        return min(parsed).timestamp()
+    hook = cairn_root / "hooks" / "enqueue.py"
+    return hook.stat().st_mtime if hook.is_file() else None
+
+
+def _render_capture_stats(repo_root: Path, cairn_root: Path) -> list[str]:
+    """`cairn stats --capture` output: how often SessionEnd actually captured.
+
+    The denominator is session transcripts, not capture-log lines, precisely
+    because the failure mode being measured is the hook not running at all --
+    counting only the runs that logged something would report 100% forever.
+    """
+
+    records = _read_capture_log(cairn_root)
+    transcripts = _session_transcripts(repo_root)
+    logged = {str(record.get("session_id")) for record in records}
+    enqueued = {str(record.get("session_id")) for record in records if record.get("enqueued")}
+
+    # Only sessions this store could plausibly have captured. Transcripts
+    # predating capture logging are history, not misses, so the window starts
+    # at the first capture-log entry. The bias runs the wrong way: misses
+    # before the very first success fall outside the window, so a reported
+    # rate is a ceiling rather than a floor.
+    #
+    # A transcript still being appended to belongs to a session that has not
+    # ended, so its SessionEnd hook has not run and cannot have failed. The
+    # grace period keeps the session asking the question out of its own answer.
+    cutoff = _capture_window_start(records, cairn_root)
+    settled = time.time() - _IN_FLIGHT_GRACE_SECONDS
+    considered = {
+        path.stem
+        for path in transcripts
+        if (cutoff is None or path.stat().st_mtime >= cutoff) and path.stat().st_mtime <= settled
+    }
+    captured = enqueued & considered
+    missed = sorted(considered - logged)
+    ran_but_failed = sorted((logged - enqueued) & considered)
+
+    lines = [
+        f"sessions (transcripts)   {len(considered):>5}",
+        f"  hook ran               {len(logged & considered):>5}",
+        f"  job enqueued           {len(captured):>5}",
+        f"  hook never ran         {len(missed):>5}",
+        f"  ran but wrote nothing  {len(ran_but_failed):>5}",
+        f"capture rate             {_rate(len(captured), len(considered), 'sessions')}",
+    ]
+
+    by_mode: Counter[str] = Counter(str(record.get("mode") or "unrecorded") for record in records)
+    if by_mode:
+        lines += ["", "captured by mode", *_histogram(by_mode)]
+    by_reason: Counter[str] = Counter(str(record.get("reason") or "(none)") for record in records)
+    if by_reason:
+        lines += ["", "SessionEnd reason", *_histogram(by_reason)]
+    return lines
+
+
 @app.command()
 def stats(
     path: Path = typer.Argument(Path("."), help="Repository root containing `.cairn/`."),
     review: bool = typer.Option(
         False, "--review", help="Summarize `.cairn/review-log.jsonl`: approval rate and gate drops."
     ),
+    capture: bool = typer.Option(
+        False,
+        "--capture",
+        help="Summarize `.cairn/capture-log.jsonl`: how often SessionEnd actually captured.",
+    ),
 ) -> None:
-    """Summarize the review log. Only `--review` is implemented so far."""
+    """Summarize the review or capture logs. Other stats are not built yet."""
 
-    if not review:
+    if not review and not capture:
         typer.echo(
-            "error: `cairn stats` currently implements only `--review`; "
+            "error: `cairn stats` currently implements only `--review` and `--capture`; "
             "store, context and health stats are not built yet",
             err=True,
         )
         raise typer.Exit(code=1)
 
-    cairn_root = path.resolve() / ".cairn"
+    repo_root = path.resolve()
+    cairn_root = repo_root / ".cairn"
     try:
         Store(cairn_root)
     except StoreNotFoundError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
+
+    if capture:
+        typer.echo(f"capture log  {cairn_root / 'capture-log.jsonl'}")
+        typer.echo("")
+        for line in _render_capture_stats(repo_root, cairn_root):
+            typer.echo(line)
+        if not review:
+            return
+        typer.echo("")
 
     records = review_log.read(cairn_root)
     log_file = review_log.log_path(cairn_root)
@@ -1318,7 +1455,22 @@ def _doctor_claude_code_check(repo_root: Path) -> Check:
     failures = [detail for ok, detail in probes if not ok]
     if failures:
         return Check(FAIL, "claude-code", "; ".join(failures))
-    return Check(PASS, "claude-code", "; ".join(detail for _, detail in probes))
+
+    # Both commands run and produce what they should -- but that is
+    # spawnability, not capture. Measured on this machine, roughly one headless
+    # session in twelve ends without its SessionEnd hook ever starting: the
+    # process leaves no trace at all, which is Claude Code's hook lifecycle
+    # rather than anything this hook does. Reporting PASS here would restate
+    # the original bug in a subtler form -- a green row for a path that
+    # silently drops sessions. The real rate is measurable, so doctor points
+    # at it instead of asserting.
+    return Check(
+        UNVERIFIED,
+        "claude-code",
+        "; ".join(detail for _, detail in probes)
+        + " — both spawn correctly, but capture under a real session lifecycle is "
+        "lossy and unproven here; run `cairn stats --capture` for the measured rate",
+    )
 
 
 def _parse_version(text: str) -> tuple[int, ...] | None:

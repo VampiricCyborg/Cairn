@@ -689,6 +689,27 @@ silent prerequisites that failed without telling anyone.
 `cairn doctor` does not take any of this on trust — it executes the registered
 hooks and checks what they actually produce.
 
+**Capture is lossy, and the loss is not in this hook.** Measured on Windows over
+12 headless `claude -p` sessions with a three-checkpoint trace enabled, 11
+sessions ran the hook to completion and wrote their job; 1 left no trace at all
+— not a partial write, not a truncated read, no evidence the process ever
+reached Python. The session itself ended normally and wrote a full transcript.
+The loss is in Claude Code's hook spawn/reap during teardown, so nothing inside
+`enqueue.py` can fix it; a retry or a daemon would be papering over someone
+else's lifecycle.
+
+Consequences, stated rather than worked around:
+
+- `cairn stats --capture` reports the measured rate. Its denominator is the
+  number of session transcripts, not the number of hook runs, precisely because
+  the failure mode is the hook not running.
+- `cairn doctor` reports the Claude Code adapter as **UNVERIFIED**, not PASS,
+  even when both hooks spawn and behave correctly. Spawnability is not capture,
+  and a green row for a path that silently drops sessions is the same class of
+  mistake as the one that hid the original Windows failure.
+- Interactive capture rate is still accumulating; it is not yet a number worth
+  quoting.
+
 The `SessionStart` hook returns approved context through `additionalContext`, which Claude Code inserts at the start of the conversation:
 
 ```json

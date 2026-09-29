@@ -75,10 +75,14 @@ def test_healthy_install_passes_and_exits_zero(tmp_path: Path) -> None:
     exit_code, output = _doctor(tmp_path)
 
     assert exit_code == 0, output
-    assert "PASS claude-code" in output
     # It must say it ran them, not that they are registered.
     assert "SessionEnd wrote a job" in output
     assert "SessionStart returned" in output
+    # ...and must not claim capture works on the strength of spawnability:
+    # sessions are lost to Claude Code's hook lifecycle, not to this command.
+    assert "PASS claude-code" not in output
+    assert "UNVERIFIED claude-code" in output
+    assert "cairn stats --capture" in output
 
 
 def test_executing_the_hooks_does_not_touch_the_real_store(tmp_path: Path) -> None:
