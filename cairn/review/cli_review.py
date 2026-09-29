@@ -112,7 +112,7 @@ def _git_user_name(cwd: Path) -> str | None:
 
 
 def _render_markdown(entry: Entry, body: str) -> str:
-    """Frontmatter + body, in the same shape `Store.write_entry` persists."""
+    """Frontmatter + body, in the same shape `Store.write_trusted` persists."""
 
     post = frontmatter.Post(body, **entry.model_dump(mode="json"))
     return frontmatter.dumps(post) + "\n"
@@ -261,7 +261,7 @@ class ReviewSession:
             f"approved by {self._reviewer_name()})\n\n{candidate.body.strip()}\n"
         )
         amended = target.model_copy(update={"updated": self.now()})
-        self.store.write_entry(amended, existing_body.rstrip("\n") + note)
+        self.store.write_trusted(amended, existing_body.rstrip("\n") + note)
         candidate.path.unlink()
         return True
 
@@ -286,7 +286,7 @@ class ReviewSession:
         )
         # Write the approved copy before removing the staged one, so a crash
         # in between leaves a duplicate rather than losing the entry.
-        target = self.store.write_entry(approved, body)
+        target = self.store.write_trusted(approved, body)
         candidate.path.unlink()
         self.summary.approved += 1
         typer.echo(f"approved {approved.id} -> {target}")

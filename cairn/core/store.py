@@ -19,6 +19,9 @@ logger = logging.getLogger(__name__)
 
 _SLUG_WORD_RE = re.compile(r"[^a-z0-9]+")
 
+#: Statuses of entries that live in `entries/<type>/`, i.e. the trusted store.
+_TRUSTED_STATUSES = frozenset({EntryStatus.APPROVED, EntryStatus.SUPERSEDED, EntryStatus.ARCHIVED})
+
 
 class StoreError(Exception):
     """Base error for problems with a `.cairn/` store."""
@@ -146,21 +149,53 @@ class Store:
 
     def read_body(self, entry: Entry) -> str | None:
         """The Markdown body already written for `entry`, at the path
-        `write_entry` would compute for it, or `None` if nothing is written
-        there yet."""
+        `write_staged` / `write_trusted` would compute for it, or `None` if
+        nothing is written there yet."""
 
         path = self._target_path(entry)
         if not path.is_file():
             return None
         return frontmatter.load(path).content
 
-    def write_entry(self, entry: Entry, body: str) -> Path:
-        """Atomically write `entry` (with Markdown `body`) to the store.
+    def write_staged(self, entry: Entry, body: str) -> Path:
+        """Atomically write a candidate to `staging/`.
 
-        Writes to a temp file in the destination directory, then `os.replace`s
-        it into place, so a process killed mid-write can never leave a
-        corrupted or half-written file at the final path.
+        The only writer the extraction side (the Curator, and through it
+        `cairn reflect` and the queue sweep) uses. It refuses any entry whose
+        status is not `staged`, and only ever writes `staging/`, so nothing
+        that stages candidates can put a file into the trusted store.
         """
+
+        if entry.status is not EntryStatus.STAGED:
+            raise StoreError(
+                f"write_staged only writes staged candidates; {entry.id} has status "
+                f"{entry.status.value!r}"
+            )
+        return self._write(entry, body)
+
+    def write_trusted(self, entry: Entry, body: str) -> Path:
+        """Atomically write an approved (or later-lifecycle) entry to
+        `entries/<type>/`.
+
+        Only the review flow (`cairn.review`) may call this: nothing reaches
+        the trusted store except through an explicit human approval. A test
+        (`tests/test_store_write_surface.py`) fails if any other package
+        does. Refuses `staged` and `rejected` entries, which never live in
+        `entries/`.
+        """
+
+        if entry.status not in _TRUSTED_STATUSES:
+            raise StoreError(
+                f"write_trusted only writes trusted entries (approved, superseded, archived); "
+                f"{entry.id} has status {entry.status.value!r}"
+            )
+        return self._write(entry, body)
+
+    def _write(self, entry: Entry, body: str) -> Path:
+        """Write `entry` (with Markdown `body`) to the directory its status
+        selects, via a temp file in that directory and `os.replace`, so a
+        process killed mid-write can never leave a corrupted or half-written
+        file at the final path."""
 
         target = self._target_path(entry)
         directory = target.parent

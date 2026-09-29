@@ -109,7 +109,7 @@ def test_find_near_duplicate_gray_zone_confirmed_by_body(tmp_path: Path) -> None
         title="Staging auth tokens expire after 15 minutes",
         status=EntryStatus.APPROVED,
     )
-    store.write_entry(
+    store.write_trusted(
         existing,
         "Staging tokens are short-lived by design, so refresh bugs surface early during review.",
     )
@@ -134,7 +134,7 @@ def test_find_near_duplicate_gray_zone_without_body_corroboration_is_none(tmp_pa
         title="Staging auth tokens expire after 15 minutes",
         status=EntryStatus.APPROVED,
     )
-    store.write_entry(existing, "Original unrelated body text about token refresh internals.")
+    store.write_trusted(existing, "Original unrelated body text about token refresh internals.")
     candidate = _make_entry(
         id="fact-222222",
         title="Staging auth tokens expire after fifteen minutes, not thirty",
@@ -305,7 +305,7 @@ def test_stage_candidate_near_duplicate_of_approved_becomes_amendment(tmp_path: 
     store = _new_store(tmp_path)
     curator = Curator(store)
     existing = _make_entry(id="fact-111111", status=EntryStatus.APPROVED)
-    store.write_entry(existing, "Existing body.")
+    store.write_trusted(existing, "Existing body.")
     candidate = _make_entry(id="fact-222222", title=existing.title)
 
     result = curator.stage_candidate(candidate, "New evidence for the same fact.")
@@ -331,7 +331,7 @@ def test_stage_candidate_structural_contradiction_becomes_supersession_not_auto_
         tags=["auth", "staging"],
         status=EntryStatus.APPROVED,
     )
-    store.write_entry(existing, "Existing body.")
+    store.write_trusted(existing, "Existing body.")
     candidate = _make_entry(
         id="fact-222222",
         title="Retry logic in the auth client swallows 429 responses",
@@ -371,17 +371,40 @@ def test_stage_candidate_novel_candidate_stages_normally(tmp_path: Path) -> None
 
 
 def test_stage_candidate_checks_staged_peers_too(tmp_path: Path) -> None:
-    """The gap test_reflect_second_session_same_error_duplicates_in_staging
+    """The gap test_reflect_second_session_same_error_is_flagged_as_amendment_in_staging
     surfaced: a near-duplicate of a peer still sitting in staging/ (not yet
     approved) must not be re-staged as an unrelated second candidate."""
 
     store = _new_store(tmp_path)
     curator = Curator(store)
     first = _make_entry(id="fact-111111", title="A repeated lesson from session one")
-    store.write_entry(first, "Body from the first session.")
+    store.write_staged(first, "Body from the first session.")
 
     second = _make_entry(id="fact-222222", title="A repeated lesson from session one")
     result = curator.stage_candidate(second, "Body from a second, later session.")
 
     assert result.outcome == "amendment"
     assert result.related_entry_id == first.id
+
+
+def test_restaging_the_same_candidate_does_not_propose_an_amendment_of_itself(
+    tmp_path: Path,
+) -> None:
+    """Re-running `reflect` on one trace (or a sweep retry) stages the same
+    candidate id again. Its own staging file is not a peer to duplicate: it
+    is overwritten in place, and must not come back flagged as a proposed
+    amendment of itself."""
+
+    store = _new_store(tmp_path)
+    curator = Curator(store)
+    candidate = _make_entry(id="fact-111111")
+
+    first = curator.stage_candidate(candidate, "Body.")
+    second = curator.stage_candidate(candidate, "Body.")
+
+    assert second.outcome == "new"
+    assert second.related_entry_id is None
+    assert second.written_path == first.written_path
+    assert second.written_path is not None
+    assert load_entry(second.written_path).proposed_amendment_of is None
+    assert len(list(store.staging_dir.glob("*.md"))) == 1

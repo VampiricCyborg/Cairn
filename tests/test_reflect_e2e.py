@@ -68,14 +68,15 @@ def test_reflect_rerun_same_session_does_not_grow_staging(tmp_path: Path) -> Non
     """Re-running `reflect` with the *same* trace file (same session_id) must
     not keep piling entries into staging/.
 
-    NOTE: this passes, but only incidentally. `MockProvider` derives an
-    entry's id (and therefore `Store._target_path`'s filename) from
-    `f"{trace.session_id}:{error_text}"`, so replaying the identical trace
-    produces the identical id/filename and the second write overwrites the
-    first in place. Nothing here is a real near-duplicate check: the
-    provider's dedup only ever consults `known` (here `store.approved()`),
-    never `staging/`. See test_reflect_second_session_same_error_duplicates_in_staging
-    for the real gap this masks.
+    `MockProvider` derives an entry's id (and therefore `Store._target_path`'s
+    filename) from `f"{trace.session_id}:{error_text}"`, so replaying the
+    identical trace produces the identical id/filename and the second write
+    overwrites the first in place. The Curator does not treat that staged
+    copy as a peer to duplicate (see
+    test_restaging_the_same_candidate_does_not_propose_an_amendment_of_itself),
+    so the file comes back unflagged. A genuinely different session hitting
+    the same error is the case
+    test_reflect_second_session_same_error_is_flagged_as_amendment_in_staging covers.
     """
 
     _init(tmp_path)
@@ -92,15 +93,18 @@ def test_reflect_rerun_same_session_does_not_grow_staging(tmp_path: Path) -> Non
 
     after_second = sorted(p.name for p in store.staging_dir.glob("*.md"))
     assert after_second == after_first
+    assert all(load_entry(p).proposed_amendment_of is None for p in store.staging_dir.glob("*.md"))
 
 
-def test_reflect_second_session_same_error_duplicates_in_staging(tmp_path: Path) -> None:
-    """The real gap: two *distinct* sessions hitting the same underlying error
-    each get their own entry id (id is keyed on session_id), so the staged
-    near-duplicate check -- which only looks at `store.approved()`, never
-    `staging/` -- does not stop the second session's candidate from being
-    staged alongside the first. This is a real P1/P2 gap in the mock
-    provider's dedup, not something this test suite works around.
+def test_reflect_second_session_same_error_is_flagged_as_amendment_in_staging(
+    tmp_path: Path,
+) -> None:
+    """Two *distinct* sessions hitting the same underlying error each get their
+    own entry id (id is keyed on session_id), and the provider's own dedup
+    only consults `store.approved()`, so both candidates reach the Curator.
+    The Curator checks staged peers too: the second session's candidates are
+    still staged (a human decides), but flagged `proposed_amendment_of` the
+    first session's, rather than passing as unrelated new entries.
     """
 
     _init(tmp_path)
@@ -122,10 +126,23 @@ def test_reflect_second_session_same_error_duplicates_in_staging(tmp_path: Path)
     assert second.exit_code == 0, second.output
 
     store = Store(tmp_path / ".cairn")
-    staged_titles = [load_entry(p).title for p in store.staging_dir.glob("*.md")]
+    staged = [load_entry(p) for p in store.staging_dir.glob("*.md")]
+    staged_titles = [entry.title for entry in staged]
 
-    # Same underlying errors, two different (unreviewed) sessions -> the same
-    # gotcha title now appears twice in staging/, unstopped by the provider's
-    # known-only dedup check.
+    # Same underlying errors, two different (unreviewed) sessions -> each
+    # title appears twice in staging/, and the later copy points at the
+    # earlier one for the reviewer.
     assert len(staged_titles) == 2 * _FIXTURE_DISTINCT_ERRORS
     assert len(set(staged_titles)) == _FIXTURE_DISTINCT_ERRORS
+
+    first_session = {
+        e.title: e
+        for e in staged
+        if e.evidence.session_id == "b1a2c3d4-5e6f-4a1b-9c3d-7f8e9a0b1c2d"
+    }
+    second_session = [
+        e for e in staged if e.evidence.session_id != "b1a2c3d4-5e6f-4a1b-9c3d-7f8e9a0b1c2d"
+    ]
+    assert len(second_session) == _FIXTURE_DISTINCT_ERRORS
+    for entry in second_session:
+        assert entry.proposed_amendment_of == first_session[entry.title].id

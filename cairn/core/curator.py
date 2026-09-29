@@ -240,11 +240,19 @@ class Curator:
         # amendment to whichever of the two the human approves first. Either
         # way this is what closes the staging-dedup gap the reflect e2e
         # tests surfaced — the old check only ever consulted `approved()`.
-        known = [*self.store.approved(), *self.store.load_all(status=EntryStatus.STAGED)]
+        # The candidate's own staging file (same id) is not a peer: restaging
+        # it -- `reflect` re-run on one trace, a sweep retry -- overwrites it
+        # in place rather than duplicating it.
+        peers = [
+            staged
+            for staged in self.store.load_all(status=EntryStatus.STAGED)
+            if staged.id != candidate.id
+        ]
+        known = [*self.store.approved(), *peers]
         duplicate = self.find_near_duplicate(candidate, known, candidate_body=body)
         if duplicate is not None:
             marked = candidate.model_copy(update={"proposed_amendment_of": duplicate.id})
-            path = self.store.write_entry(marked, body)
+            path = self.store.write_staged(marked, body)
             return CurationResult(
                 outcome="amendment", written_path=path, related_entry_id=duplicate.id
             )
@@ -252,10 +260,10 @@ class Curator:
         contradicted = self.find_contradiction(candidate, self.store.approved())
         if contradicted is not None:
             marked = candidate.model_copy(update={"proposed_supersession_of": contradicted.id})
-            path = self.store.write_entry(marked, body)
+            path = self.store.write_staged(marked, body)
             return CurationResult(
                 outcome="supersession", written_path=path, related_entry_id=contradicted.id
             )
 
-        path = self.store.write_entry(candidate, body)
+        path = self.store.write_staged(candidate, body)
         return CurationResult(outcome="new", written_path=path, related_entry_id=None)

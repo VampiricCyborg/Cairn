@@ -54,7 +54,7 @@ def _stage(store: Store, count: int) -> list[Path]:
     """Stage `count` fact candidates whose filenames sort in creation order."""
 
     return [
-        store.write_entry(
+        store.write_staged(
             _make_entry(id=f"fact-00000{i}", title=f"Candidate {chr(ord('a') + i)}"),
             f"Body of candidate {i}.",
         )
@@ -138,7 +138,7 @@ def test_reject_tombstone_carries_candidates_excerpt_hash(store: Store) -> None:
             excerpt_sha256="a" * 64,
         )
     )
-    store.write_entry(entry, "Body.")
+    store.write_staged(entry, "Body.")
 
     exit_code, output = _review(store, "r\nnot stable\n")
 
@@ -177,7 +177,7 @@ def test_quit_stops_and_leaves_remaining_untouched(store: Store) -> None:
 
 def test_merge_amends_target_entry_in_place(store: Store) -> None:
     target = _make_entry(id="fact-999999", title="Existing fact", status=EntryStatus.APPROVED)
-    store.write_entry(target, "Existing body.")
+    store.write_trusted(target, "Existing body.")
     (staged,) = _stage(store, 1)
 
     # merge, target id, accept default reviewer for the amendment note
@@ -200,7 +200,7 @@ def test_merge_amends_target_entry_in_place(store: Store) -> None:
 
 def test_display_shows_proposed_amendment_marker(store: Store) -> None:
     candidate = _make_entry(proposed_amendment_of="fact-999999")
-    store.write_entry(candidate, "New evidence.")
+    store.write_staged(candidate, "New evidence.")
 
     exit_code, output = _review(store, "q\n")
 
@@ -210,7 +210,7 @@ def test_display_shows_proposed_amendment_marker(store: Store) -> None:
 
 def test_display_shows_proposed_supersession_marker(store: Store) -> None:
     candidate = _make_entry(proposed_supersession_of="fact-999999")
-    store.write_entry(candidate, "Conflicting evidence.")
+    store.write_staged(candidate, "Conflicting evidence.")
 
     exit_code, output = _review(store, "q\n")
 
@@ -220,9 +220,9 @@ def test_display_shows_proposed_supersession_marker(store: Store) -> None:
 
 def test_approve_amendment_marked_candidate_updates_target_in_place(store: Store) -> None:
     target = _make_entry(id="fact-999999", title="Existing fact", status=EntryStatus.APPROVED)
-    store.write_entry(target, "Existing body.")
+    store.write_trusted(target, "Existing body.")
     candidate = _make_entry(proposed_amendment_of="fact-999999")
-    store.write_entry(candidate, "New evidence for the existing fact.")
+    store.write_staged(candidate, "New evidence for the existing fact.")
 
     exit_code, output = _review(store, "a\n\n")  # approve, accept default reviewer
 
@@ -240,7 +240,7 @@ def test_approve_amendment_marked_candidate_updates_target_in_place(store: Store
 
 def test_approve_amendment_with_missing_target_falls_back_to_new_entry(store: Store) -> None:
     candidate = _make_entry(proposed_amendment_of="fact-doesnotexist")
-    store.write_entry(candidate, "Evidence with no live target.")
+    store.write_staged(candidate, "Evidence with no live target.")
 
     exit_code, output = _review(store, "a\n\n")  # approve, accept default reviewer
 

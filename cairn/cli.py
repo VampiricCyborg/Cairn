@@ -20,7 +20,7 @@ from pydantic import ValidationError
 
 from cairn import __version__
 from cairn.core.config import load_provider_name
-from cairn.core.curator import Curator
+from cairn.core.curator import CurationResult, Curator
 from cairn.core.eval import DEFAULT_JUDGE_MODEL, evaluate_fixture, summarize
 from cairn.core.models import Entry, EntryStatus, EntryType, SessionTrace
 from cairn.core.normalizer import normalize
@@ -298,6 +298,23 @@ def _resolve_provider(cairn_root: Path) -> Provider:
     return get_provider(_load_config_toml(cairn_root))
 
 
+def _extract_and_stage(
+    store: Store, provider: Provider, trace: SessionTrace, max_candidates: int
+) -> list[tuple[Entry, CurationResult]]:
+    """Extract candidates from `trace` with `provider` and stage every one
+    through `Curator.stage_candidate`.
+
+    The single path from a provider's output to `staging/`, shared by
+    `cairn reflect` and the SessionStart queue sweep so both run the same
+    tombstone, near-duplicate and contradiction gates. Nothing here (or in
+    the Curator) can write to `entries/`; only `cairn review` does.
+    """
+
+    candidates = provider.extract(trace, known=store.approved(), max_candidates=max_candidates)
+    curator = Curator(store)
+    return [(entry, curator.stage_candidate(entry, body)) for entry, body in candidates]
+
+
 _QUEUE_SWEEP_MAX_CANDIDATES = 3
 
 
@@ -317,18 +334,15 @@ def _sweep_queue(store: Store, provider: Provider) -> int:
     if not store.queue_dir.is_dir():
         return 0
 
-    curator = Curator(store)
     processed = 0
     for job_path in sorted(store.queue_dir.glob("*.json")):
         try:
             job = json.loads(job_path.read_text(encoding="utf-8"))
             transcript_path = Path(str(job["transcript_path"]))
             trace = normalize(transcript_path, harness=str(job.get("harness", "claude-code")))
-            candidates = provider.extract(
-                trace, known=store.approved(), max_candidates=_QUEUE_SWEEP_MAX_CANDIDATES
-            )
-            for entry, body in candidates:
-                result = curator.stage_candidate(entry, body)
+            for entry, result in _extract_and_stage(
+                store, provider, trace, _QUEUE_SWEEP_MAX_CANDIDATES
+            ):
                 logger.info(
                     "queue sweep: %s from %s -> %s", entry.id, job_path.name, result.outcome
                 )
@@ -413,6 +427,19 @@ def context(
     typer.echo(block)
 
 
+def _describe_curation(entry: Entry, result: CurationResult) -> str:
+    """One `cairn reflect` output line for what the Curator did with `entry`."""
+
+    if result.outcome == "dropped_tombstoned":
+        return f"dropped {entry.id}: {entry.title} (matches a rejected tombstone)"
+    line = f"staged {entry.id}: {entry.title}"
+    if result.outcome == "amendment":
+        line += f" (proposes amendment of {result.related_entry_id})"
+    elif result.outcome == "supersession":
+        line += f" (may supersede {result.related_entry_id})"
+    return line
+
+
 @app.command()
 def reflect(
     path: Path = typer.Argument(Path("."), help="Repository root containing `.cairn/`."),
@@ -439,22 +466,24 @@ def reflect(
 
     try:
         provider = _resolve_provider(cairn_root)
-        candidates = provider.extract(
-            session_trace, known=store.approved(), max_candidates=max_candidates
-        )
+        results = _extract_and_stage(store, provider, session_trace, max_candidates)
     except ProviderUnavailableError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
-    if not candidates:
+    if not results:
         typer.echo("no candidates extracted")
         return
 
-    for entry, body in candidates:
-        store.write_entry(entry, body)
-        typer.echo(f"staged {entry.id}: {entry.title}")
+    for entry, result in results:
+        typer.echo(_describe_curation(entry, result))
 
-    typer.echo(f"{len(candidates)} entries staged")
+    staged = sum(1 for _, result in results if result.written_path is not None)
+    dropped = len(results) - staged
+    summary = f"{staged} entries staged"
+    if dropped:
+        summary += f", {dropped} dropped"
+    typer.echo(summary)
 
 
 @app.command()

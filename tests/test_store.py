@@ -109,26 +109,26 @@ def test_load_all_logs_type_directory_mismatch(
     )
 
 
-def test_write_entry_round_trips_through_load_entry(tmp_path: Path) -> None:
+def test_write_trusted_round_trips_through_load_entry(tmp_path: Path) -> None:
     store = Store(_new_store_root(tmp_path))
     entry = _make_entry()
     body = "## What to know\n\nSomething true and worth remembering.\n"
 
-    path = store.write_entry(entry, body)
+    path = store.write_trusted(entry, body)
     loaded = load_entry(path)
 
     assert loaded == entry
     assert frontmatter.load(path).content.strip() == body.strip()
 
 
-def test_write_entry_kill_mid_write_preserves_original(
+def test_write_trusted_kill_mid_write_preserves_original(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = Store(_new_store_root(tmp_path))
     entry = _make_entry()
     original_body = "## Original\n\nThe original body.\n"
 
-    path = store.write_entry(entry, original_body)
+    path = store.write_trusted(entry, original_body)
     original_bytes = path.read_bytes()
 
     def _kill(*_args: object, **_kwargs: object) -> None:
@@ -137,7 +137,7 @@ def test_write_entry_kill_mid_write_preserves_original(
     monkeypatch.setattr(os, "replace", _kill)
 
     with pytest.raises(OSError):
-        store.write_entry(entry, "## Changed\n\nA different body.\n")
+        store.write_trusted(entry, "## Changed\n\nA different body.\n")
 
     assert path.read_bytes() == original_bytes
     assert list(path.parent.glob(f".{path.name}.*.tmp")) == []
